@@ -1,0 +1,64 @@
+{
+  "name": "academic-intelligence-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Academic Assessment & Performance Intelligence Platform",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "jest --coverage",
+    "test:watch": "jest --watch",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
+    "migrate": "node src/database/migrate.js",
+    "migrate:rollback": "node src/database/rollback.js",
+    "seed": "node src/database/seed.js",
+    "docs": "swagger-jsdoc -d src/config/swagger.js -o docs/swagger.json"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "cors": "^2.8.5",
+    "helmet": "^7.1.0",
+    "morgan": "^1.10.0",
+    "compression": "^1.7.4",
+    "dotenv": "^16.3.1",
+    "pg": "^8.11.3",
+    "mongoose": "^8.0.3",
+    "redis": "^4.6.12",
+    "ioredis": "^5.3.2",
+    "bcryptjs": "^2.4.3",
+    "jsonwebtoken": "^9.0.2",
+    "express-validator": "^7.0.1",
+    "express-rate-limit": "^7.1.5",
+    "uuid": "^9.0.1",
+    "axios": "^1.6.2",
+    "bull": "^4.12.0",
+    "winston": "^3.11.0",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0",
+    "multer": "^1.4.5-lts.1",
+    "csv-parser": "^3.0.0",
+    "pdfkit": "^0.14.0",
+    "exceljs": "^4.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2",
+    "jest": "^29.7.0",
+    "supertest": "^6.3.3",
+    "eslint": "^8.56.0",
+    "eslint-config-prettier": "^9.1.0",
+    "prettier": "^3.1.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "education",
+    "assessment",
+    "analytics",
+    "exam",
+    "learning"
+  ],
+  "author": "Academic Intelligence Platform Team",
+  "license": "MIT"
+}
