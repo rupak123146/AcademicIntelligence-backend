@@ -6,7 +6,7 @@ const compression = require('compression');
 
 const config = require('./config');
 const routes = require('./routes');
-const { connectMongoDB, testConnection } = require('./config/mongodb');
+const { connectDatabase, closeDatabase } = require('./config/database');
 const logger = require('./utils/logger');
 const {
   errorHandler,
@@ -75,13 +75,13 @@ app.use(errorHandler);
 // Initialize database and start server
 const startServer = async () => {
   try {
-    // Connect to MongoDB Atlas
-    const mongoConnected = await connectMongoDB();
-    if (!mongoConnected) {
-      throw new Error('MongoDB Atlas connection failed');
+    // Connect to MySQL (primary database for SQL migration)
+    const mysqlConnected = await connectDatabase();
+    if (!mysqlConnected) {
+      throw new Error('MySQL connection failed');
     }
 
-    logger.info('Database connected successfully');
+    logger.info('Database connections initialized');
 
     // Start server
     const server = app.listen(config.port, () => {
@@ -100,10 +100,9 @@ const startServer = async () => {
         logger.info('HTTP server closed');
         
         try {
-          const { closeMongoDB } = require('./config/mongodb');
           const { closeRedis } = require('./config/redis');
 
-          await closeMongoDB();
+          await closeDatabase();
           await closeRedis();
 
           logger.info('All connections closed. Exiting...');
