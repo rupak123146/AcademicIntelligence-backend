@@ -1,0 +1,742 @@
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum UserRole {
+  student
+  educator
+  admin
+}
+
+enum Gender {
+  male
+  female
+  other
+}
+
+enum EnrollmentStatus {
+  enrolled
+  completed
+  dropped
+  pending
+}
+
+enum QuestionType {
+  mcq
+  multiple
+  true_false
+  short_answer
+  numerical
+}
+
+enum DifficultyLevel {
+  easy
+  medium
+  hard
+}
+
+enum AssignmentMode {
+  section
+  department
+  individual
+  all
+}
+
+enum ExamType {
+  quiz
+  unit_test
+  internal
+  midterm
+  final
+  practice
+  assignment
+}
+
+enum ExamStatus {
+  draft
+  published
+  active
+  completed
+  archived
+}
+
+enum AttemptStatus {
+  started
+  in_progress
+  submitted
+  auto_submitted
+  graded
+}
+
+enum TaskType {
+  assignment
+  homework
+  project
+  quiz
+  reading
+}
+
+enum TaskStatus {
+  draft
+  published
+  closed
+  archived
+}
+
+enum SubmissionStatus {
+  pending
+  submitted
+  graded
+  late
+}
+
+enum ExamEventType {
+  exam_started
+  question_viewed
+  answer_submitted
+  answer_changed
+  tab_switched
+  exam_paused
+  exam_resumed
+  exam_submitted
+}
+
+model User {
+  id               String    @id @default(cuid())
+  email            String    @unique
+  passwordHash     String
+  firstName        String
+  lastName         String
+  role             UserRole
+  avatarUrl        String?
+  phoneNumber      String?
+  isActive         Boolean   @default(true)
+  emailVerified    Boolean   @default(false)
+  lastLoginAt      DateTime?
+  profileCompleted Boolean   @default(false)
+
+  institutionId String?
+  departmentId  String?
+  sectionId     String?
+
+  studentId          String?
+  rollNumber         String?
+  admissionYear      Int?
+  currentSemester    Int?
+  dateOfBirth        DateTime?
+  gender             Gender?
+  bloodGroup         String?
+  departmentCode     String?
+  yearOfStudy        String?
+  class              String?
+  currentCGPA        Float?
+  marks10th          Float?
+  marks12th          Float?
+  guardianName       String?
+  guardianPhone      String?
+  guardianEmail      String?
+  guardianRelation   String?
+  address            String?
+  residentialAddress String?
+  city               String?
+  state              String?
+  pincode            String?
+
+  employeeId     String?
+  designation    String?
+  qualification  String?
+  specialization String?
+  experience     Int?
+  joiningDate    DateTime?
+
+  adminDesignation String?
+  adminPermissions Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  institution      Institution? @relation("InstitutionUsers", fields: [institutionId], references: [id])
+  department       Department?  @relation("DepartmentUsers", fields: [departmentId], references: [id])
+  section          Section?     @relation("SectionUsers", fields: [sectionId], references: [id])
+  departmentHeadOf Department?  @relation("DepartmentHead")
+  sectionTeacherOf Section?     @relation("SectionTeacher")
+
+  createdExams      Exam[]            @relation("ExamCreator")
+  createdQuestions  Question[]        @relation("QuestionCreator")
+  instructedCourses Course[]          @relation("CourseInstructor")
+  examAttempts      ExamAttempt[]
+  examActivityLogs  ExamActivityLog[]
+  userSessions      UserSession[]
+  examAssignments   ExamAssignment[]  @relation("ExamAssignedBy")
+  createdTasks      Task[]            @relation("TaskCreator")
+  taskAssignments   TaskAssignment[]
+
+  educatorSections  EducatorSection[]
+  educatorSubjects  EducatorSubject[]
+  StudentEnrollment StudentEnrollment[]
+  ExamStudent       ExamStudent[]
+
+  @@index([role])
+  @@index([institutionId])
+  @@index([departmentId])
+  @@index([sectionId])
+  @@index([studentId])
+  @@index([employeeId])
+  @@map("users")
+}
+
+model Institution {
+  id              String  @id @default(cuid())
+  name            String
+  code            String  @unique
+  type            String  @default("college")
+  address         String?
+  city            String?
+  state           String?
+  pincode         String?
+  phone           String?
+  email           String?
+  website         String?
+  logoUrl         String?
+  principalName   String?
+  establishedYear Int?
+  affiliatedTo    String?
+  isActive        Boolean @default(true)
+  settings        Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  departments Department[]
+  sections    Section[]
+  subjects    Subject[]
+  courses     Course[]
+  exams       Exam[]
+  users       User[]       @relation("InstitutionUsers")
+
+  @@map("institutions")
+}
+
+model Department {
+  id                 String  @id @default(cuid())
+  institutionId      String
+  name               String
+  code               String
+  shortName          String?
+  headOfDepartmentId String? @unique
+  description        String?
+  establishedYear    Int?
+  totalSeats         Int?
+  isActive           Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  institution      Institution      @relation(fields: [institutionId], references: [id])
+  headOfDepartment User?            @relation("DepartmentHead", fields: [headOfDepartmentId], references: [id])
+  sections         Section[]
+  courses          Course[]
+  users            User[]           @relation("DepartmentUsers")
+  ExamDepartment   ExamDepartment[]
+
+  @@unique([institutionId, code])
+  @@map("departments")
+}
+
+model Section {
+  id              String  @id @default(cuid())
+  institutionId   String
+  departmentId    String
+  name            String
+  year            Int
+  semester        Int?
+  academicYear    String?
+  batchYear       Int?
+  classTeacherId  String? @unique
+  maxStrength     Int     @default(60)
+  currentStrength Int     @default(0)
+  isActive        Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  institution  Institution @relation(fields: [institutionId], references: [id])
+  department   Department  @relation(fields: [departmentId], references: [id])
+  classTeacher User?       @relation("SectionTeacher", fields: [classTeacherId], references: [id])
+  users        User[]      @relation("SectionUsers")
+
+  examSections     ExamSection[]
+  educatorSections EducatorSection[]
+
+  @@index([departmentId, year, name])
+  @@index([institutionId])
+  @@map("sections")
+}
+
+model Subject {
+  id            String  @id @default(cuid())
+  name          String
+  code          String  @unique
+  description   String?
+  department    String?
+  institutionId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  institution      Institution?      @relation(fields: [institutionId], references: [id])
+  chapters         Chapter[]
+  courses          Course[]
+  questions        Question[]
+  educatorSubjects EducatorSubject[]
+  Exam             Exam[]
+
+  @@map("subjects")
+}
+
+model Chapter {
+  id            String  @id @default(cuid())
+  subjectId     String
+  name          String
+  chapterNumber Int
+  description   String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subject   Subject    @relation(fields: [subjectId], references: [id])
+  concepts  Concept[]
+  questions Question[]
+
+  @@index([subjectId, chapterNumber])
+  @@map("chapters")
+}
+
+model Concept {
+  id              String           @id @default(cuid())
+  chapterId       String
+  name            String
+  description     String?
+  difficultyLevel DifficultyLevel?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chapter   Chapter    @relation(fields: [chapterId], references: [id])
+  questions Question[]
+
+  @@index([chapterId])
+  @@map("concepts")
+}
+
+model Course {
+  id           String  @id @default(cuid())
+  name         String
+  code         String
+  description  String?
+  subjectId    String?
+  instructorId String
+  departmentId String?
+  academicYear String?
+  semester     String?
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subject         Subject?            @relation(fields: [subjectId], references: [id])
+  instructor      User                @relation("CourseInstructor", fields: [instructorId], references: [id])
+  department      Department?         @relation(fields: [departmentId], references: [id])
+  enrollments     StudentEnrollment[]
+  exams           Exam[]
+  examAssignments ExamAssignment[]
+  tasks           Task[]
+  Institution     Institution?        @relation(fields: [institutionId], references: [id])
+  institutionId   String?
+
+  @@index([instructorId])
+  @@index([code])
+  @@map("courses")
+}
+
+model StudentEnrollment {
+  id         String           @id @default(cuid())
+  studentId  String
+  courseId   String
+  status     EnrollmentStatus @default(enrolled)
+  enrolledAt DateTime         @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  student User   @relation(fields: [studentId], references: [id])
+  course  Course @relation(fields: [courseId], references: [id])
+
+  @@unique([studentId, courseId])
+  @@map("student_enrollments")
+}
+
+model Question {
+  id            String          @id @default(cuid())
+  subjectId     String?
+  chapterId     String?
+  conceptId     String?
+  createdById   String?
+  questionText  String
+  questionType  QuestionType
+  correctAnswer Json?
+  explanation   String?
+  difficulty    DifficultyLevel @default(medium)
+  marks         Float           @default(1)
+  negativeMarks Float           @default(0)
+  tags          Json?
+  isActive      Boolean         @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subject         Subject?          @relation(fields: [subjectId], references: [id])
+  chapter         Chapter?          @relation(fields: [chapterId], references: [id])
+  concept         Concept?          @relation(fields: [conceptId], references: [id])
+  createdBy       User?             @relation("QuestionCreator", fields: [createdById], references: [id])
+  options         QuestionOption[]
+  examQuestions   ExamQuestion[]
+  studentAnswers  StudentAnswer[]
+  ExamActivityLog ExamActivityLog[]
+
+  @@index([subjectId])
+  @@index([chapterId])
+  @@index([difficulty])
+  @@map("questions")
+}
+
+model QuestionOption {
+  id         String  @id @default(cuid())
+  questionId String
+  text       String
+  isCorrect  Boolean @default(false)
+
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@index([questionId])
+  @@map("question_options")
+}
+
+model Exam {
+  id            String  @id @default(cuid())
+  title         String
+  description   String?
+  instructions  String?
+  createdById   String
+  institutionId String?
+  subjectId     String?
+  courseId      String?
+
+  assignmentMode    AssignmentMode @default(section)
+  examType          ExamType       @default(quiz)
+  durationMinutes   Int
+  totalMarks        Float
+  passingMarks      Float?
+  passingPercentage Float          @default(40)
+  negativeMarking   Boolean        @default(false)
+  negativeMarkValue Float          @default(0)
+  shuffleQuestions  Boolean        @default(true)
+  shuffleOptions    Boolean        @default(true)
+  showResult        Boolean        @default(true)
+  showAnswers       Boolean        @default(false)
+  allowReview       Boolean        @default(true)
+  maxAttempts       Int            @default(1)
+
+  status    ExamStatus @default(draft)
+  startTime DateTime?
+  endTime   DateTime?
+
+  totalAttempts Int   @default(0)
+  averageScore  Float @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  createdBy   User         @relation("ExamCreator", fields: [createdById], references: [id])
+  institution Institution? @relation(fields: [institutionId], references: [id])
+  subject     Subject?     @relation(fields: [subjectId], references: [id])
+  course      Course?      @relation(fields: [courseId], references: [id])
+
+  questions       ExamQuestion[]
+  attempts        ExamAttempt[]
+  examAssignments ExamAssignment[]
+  examSections    ExamSection[]
+  examDepartments ExamDepartment[]
+  examStudents    ExamStudent[]
+  ExamActivityLog ExamActivityLog[]
+
+  @@index([createdById])
+  @@index([status])
+  @@index([startTime, endTime])
+  @@index([institutionId])
+  @@map("exams")
+}
+
+model ExamQuestion {
+  examId     String
+  questionId String
+  orderIndex Int?
+
+  exam     Exam     @relation(fields: [examId], references: [id])
+  question Question @relation(fields: [questionId], references: [id])
+
+  @@id([examId, questionId])
+  @@map("exam_questions")
+}
+
+model ExamAttempt {
+  id             String        @id @default(cuid())
+  examId         String
+  studentId      String
+  attemptNumber  Int           @default(1)
+  status         AttemptStatus @default(started)
+  startedAt      DateTime      @default(now())
+  submittedAt    DateTime?
+  ipAddress      String?
+  browserInfo    Json?
+  totalScore     Float         @default(0)
+  maxScore       Float?
+  percentage     Float?
+  correctAnswers Int           @default(0)
+  wrongAnswers   Int           @default(0)
+  skipped        Int           @default(0)
+  timeTaken      Int?
+  grade          String?
+  passed         Boolean?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  exam         Exam              @relation(fields: [examId], references: [id])
+  student      User              @relation(fields: [studentId], references: [id])
+  answers      StudentAnswer[]
+  activityLogs ExamActivityLog[]
+
+  @@index([examId, studentId])
+  @@index([studentId, status])
+  @@map("exam_attempts")
+}
+
+model StudentAnswer {
+  id                String    @id @default(cuid())
+  attemptId         String
+  questionId        String
+  selectedAnswer    Json?
+  isCorrect         Boolean?
+  isAnswered        Boolean   @default(false)
+  isMarkedForReview Boolean   @default(false)
+  marksAwarded      Float     @default(0)
+  timeSpent         Int?
+  answeredAt        DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempt  ExamAttempt @relation(fields: [attemptId], references: [id])
+  question Question    @relation(fields: [questionId], references: [id])
+
+  @@unique([attemptId, questionId])
+  @@index([attemptId])
+  @@index([questionId])
+  @@map("student_answers")
+}
+
+model UserSession {
+  id           String   @id @default(cuid())
+  userId       String
+  token        String
+  refreshToken String?
+  ipAddress    String?
+  userAgent    String?
+  deviceInfo   Json?
+  expiresAt    DateTime
+  isActive     Boolean  @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("user_sessions")
+}
+
+model ExamActivityLog {
+  id                  String        @id @default(cuid())
+  attemptId           String
+  studentId           String
+  examId              String
+  eventType           ExamEventType
+  questionId          String?
+  previousAnswer      Json?
+  newAnswer           Json?
+  timeSpentOnQuestion Int?
+  metadata            Json?
+  timestamp           DateTime      @default(now())
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  attempt  ExamAttempt @relation(fields: [attemptId], references: [id])
+  student  User        @relation(fields: [studentId], references: [id])
+  exam     Exam        @relation(fields: [examId], references: [id])
+  question Question?   @relation(fields: [questionId], references: [id])
+
+  @@index([attemptId])
+  @@index([studentId])
+  @@index([examId])
+  @@index([timestamp])
+  @@map("exam_activity_logs")
+}
+
+model ExamAssignment {
+  id           String    @id @default(cuid())
+  examId       String
+  courseId     String
+  assignedById String?
+  assignedAt   DateTime  @default(now())
+  dueDate      DateTime?
+  isActive     Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  exam       Exam   @relation(fields: [examId], references: [id])
+  course     Course @relation(fields: [courseId], references: [id])
+  assignedBy User?  @relation("ExamAssignedBy", fields: [assignedById], references: [id])
+
+  @@unique([examId, courseId])
+  @@index([courseId])
+  @@map("exam_assignments")
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  title        String
+  description  String?
+  courseId     String
+  createdById  String
+  taskType     TaskType   @default(assignment)
+  dueDate      DateTime
+  instructions String?
+  totalMarks   Float      @default(0)
+  status       TaskStatus @default(draft)
+  isActive     Boolean    @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course      Course           @relation(fields: [courseId], references: [id])
+  createdBy   User             @relation("TaskCreator", fields: [createdById], references: [id])
+  attachments TaskAttachment[]
+  assignments TaskAssignment[]
+
+  @@index([courseId])
+  @@index([createdById])
+  @@index([dueDate])
+  @@map("tasks")
+}
+
+model TaskAttachment {
+  id         String   @id @default(cuid())
+  taskId     String
+  fileName   String
+  fileUrl    String
+  uploadedAt DateTime @default(now())
+
+  task Task @relation(fields: [taskId], references: [id])
+
+  @@index([taskId])
+  @@map("task_attachments")
+}
+
+model TaskAssignment {
+  id               String           @id @default(cuid())
+  taskId           String
+  studentId        String
+  assignedAt       DateTime         @default(now())
+  submissionStatus SubmissionStatus @default(pending)
+  submissionDate   DateTime?
+  submissionUrl    String?
+  feedback         String?
+  marksAwarded     Float?
+  grade            String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  task    Task @relation(fields: [taskId], references: [id])
+  student User @relation(fields: [studentId], references: [id])
+
+  @@unique([taskId, studentId])
+  @@index([studentId])
+  @@index([submissionStatus])
+  @@map("task_assignments")
+}
+
+model EducatorSection {
+  educatorId String
+  sectionId  String
+
+  educator User    @relation(fields: [educatorId], references: [id])
+  section  Section @relation(fields: [sectionId], references: [id])
+
+  @@id([educatorId, sectionId])
+  @@map("educator_sections")
+}
+
+model EducatorSubject {
+  educatorId String
+  subjectId  String
+
+  educator User    @relation(fields: [educatorId], references: [id])
+  subject  Subject @relation(fields: [subjectId], references: [id])
+
+  @@id([educatorId, subjectId])
+  @@map("educator_subjects")
+}
+
+model ExamSection {
+  examId    String
+  sectionId String
+
+  exam    Exam    @relation(fields: [examId], references: [id])
+  section Section @relation(fields: [sectionId], references: [id])
+
+  @@id([examId, sectionId])
+  @@map("exam_sections")
+}
+
+model ExamDepartment {
+  examId       String
+  departmentId String
+
+  exam       Exam       @relation(fields: [examId], references: [id])
+  department Department @relation(fields: [departmentId], references: [id])
+
+  @@id([examId, departmentId])
+  @@map("exam_departments")
+}
+
+model ExamStudent {
+  examId    String
+  studentId String
+
+  exam    Exam @relation(fields: [examId], references: [id])
+  student User @relation(fields: [studentId], references: [id])
+
+  @@id([examId, studentId])
+  @@map("exam_students")
+}
