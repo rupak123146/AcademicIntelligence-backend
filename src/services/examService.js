@@ -260,9 +260,39 @@ class ExamService {
       };
     }));
 
+    const dedupeKey = (exam) => {
+      const start = exam.startTime ? new Date(exam.startTime).toISOString() : '';
+      const end = exam.endTime ? new Date(exam.endTime).toISOString() : '';
+      return [
+        exam.title,
+        exam.courseId || '',
+        exam.subjectId || '',
+        exam.createdBy || '',
+        exam.examType || '',
+        start,
+        end,
+      ].join('|');
+    };
+
+    const seen = new Map();
+    const uniqueExams = [];
+    examResponses.forEach((exam) => {
+      const key = dedupeKey(exam);
+      if (seen.has(key)) {
+        logger.warn('Duplicate exam response filtered', {
+          examId: exam.id,
+          duplicateOf: seen.get(key),
+          key,
+        });
+        return;
+      }
+      seen.set(key, exam.id);
+      uniqueExams.push(exam);
+    });
+
     return {
-      exams: examResponses,
-      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
+      exams: uniqueExams,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, uniqueExams.length),
     };
   }
 

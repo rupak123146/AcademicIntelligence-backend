@@ -161,23 +161,49 @@ router.put('/profile', authenticate, async (req, res) => {
   try {
     const updateData = {};
 
-    const allowedFields = [
-      'firstName', 'lastName', 'phoneNumber', 'dateOfBirth', 'gender',
-      'departmentCode', 'yearOfStudy', 'class', 'currentCGPA', 'marks10th', 'marks12th',
+    // String fields
+    const stringFields = [
+      'firstName', 'lastName', 'phoneNumber', 'gender',
+      'departmentCode', 'yearOfStudy', 'class',
       'guardianName', 'guardianPhone', 'guardianEmail', 'guardianRelation',
       'address', 'residentialAddress', 'city', 'state', 'pincode',
-      'qualification', 'specialization', 'experience',
+      'qualification', 'specialization',
     ];
 
-    allowedFields.forEach((field) => {
-      if (req.body[field] !== undefined && req.body[field] !== null) {
-        updateData[field] = req.body[field];
+    // Numeric fields
+    const numericFields = ['currentCGPA', 'marks10th', 'marks12th', 'experience'];
+
+    // Process string fields
+    stringFields.forEach((field) => {
+      if (req.body[field] !== undefined && req.body[field] !== null && req.body[field] !== '') {
+        updateData[field] = String(req.body[field]);
       }
     });
 
+    // Process numeric fields
+    numericFields.forEach((field) => {
+      if (req.body[field] !== undefined && req.body[field] !== null && req.body[field] !== '') {
+        const value = parseFloat(req.body[field]);
+        if (!isNaN(value)) {
+          updateData[field] = field === 'experience' ? parseInt(req.body[field], 10) : value;
+        }
+      }
+    });
+
+    // Process dateOfBirth specially
+    if (req.body.dateOfBirth) {
+      const date = new Date(req.body.dateOfBirth);
+      if (!isNaN(date.getTime())) {
+        updateData.dateOfBirth = date;
+      }
+    }
+
+    // Mark profile as completed if key fields are provided
     if (req.body.phoneNumber || req.body.departmentCode) {
       updateData.profileCompleted = true;
     }
+
+    console.log('Update data:', JSON.stringify(updateData, null, 2));
 
     await prisma.user.update({
       where: { id: req.user.id },
@@ -195,6 +221,8 @@ router.put('/profile', authenticate, async (req, res) => {
       data: buildUserProfile(user),
     });
   } catch (error) {
+    console.error('Profile update error:', error);
+    console.error('Error details:', JSON.stringify(error, Object.getOwnPropertyNames(error)));
     res.status(500).json({
       success: false,
       message: 'Failed to update profile',
@@ -439,7 +467,18 @@ router.get('/sections', authenticate, async (req, res) => {
       orderBy: [{ year: 'asc' }, { name: 'asc' }],
     });
 
-    const formattedSections = sections.map((s) => ({
+    // Deduplicate sections by name + year + departmentId
+    const seenSections = new Map();
+    const uniqueSections = sections.filter((s) => {
+      const key = `${s.year}|${s.name}|${s.departmentId}`;
+      if (seenSections.has(key)) {
+        return false;
+      }
+      seenSections.set(key, true);
+      return true;
+    });
+
+    const formattedSections = uniqueSections.map((s) => ({
       _id: s.id,
       name: s.name,
       year: s.year,
@@ -559,7 +598,30 @@ router.get('/my-students', authenticate, async (req, res) => {
     const result = await Promise.all(sections.map(async (section) => {
       const students = await prisma.user.findMany({
         where: { role: 'student', sectionId: section.id, isActive: true },
-        select: { firstName: true, lastName: true, email: true, studentId: true, rollNumber: true, currentSemester: true },
+        select: { 
+          id: true,
+          firstName: true, 
+          lastName: true, 
+          email: true, 
+          studentId: true, 
+          rollNumber: true, 
+          currentSemester: true,
+          phoneNumber: true,
+          section: {
+            select: {
+              id: true,
+              name: true,
+              year: true,
+            }
+          },
+          department: {
+            select: {
+              id: true,
+              name: true,
+              code: true,
+            }
+          },
+        },
         orderBy: { rollNumber: 'asc' },
       });
 

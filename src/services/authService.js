@@ -579,8 +579,8 @@ class AuthService {
     // Common fields that admin can update for all roles
     const commonFields = ['firstName', 'lastName', 'role', 'institutionId', 'departmentId', 'isActive'];
     
-    // Educator-specific fields
-    const educatorFields = ['employeeId', 'designation', 'assignedSections', 'qualification', 'specialization', 'experience', 'joiningDate'];
+    // Educator-specific fields (assignedSections is excluded as it's handled separately via the join table)
+    const educatorFields = ['employeeId', 'designation', 'qualification', 'specialization', 'experience', 'joiningDate'];
     
     // Student-specific fields
     const studentFields = ['studentId', 'sectionId', 'rollNumber', 'admissionYear', 'currentSemester'];
@@ -596,7 +596,7 @@ class AuthService {
 
     if (user.role === 'educator' || updateData.role === 'educator') {
       for (const field of educatorFields) {
-        if (updateData[field] !== undefined) {
+        if (updateData[field] !== undefined && field !== 'assignedSections') {
           console.log(`Setting educator field ${field}:`, updateData[field]);
           updatePayload[field] = updateData[field];
         }
@@ -634,30 +634,45 @@ class AuthService {
 
     logger.info('User updated by admin:', { userId, role: updateData.role || user.role, updates: Object.keys(updateData) });
 
-    // Return updated user with role-specific fields
-    const response = {
-      id: user.id,
-      email: user.email,
-      firstName: user.firstName,
-      lastName: user.lastName,
-      role: user.role,
-      institutionId: user.institutionId,
-      departmentId: user.departmentId,
-      isActive: user.isActive,
+    const updatedUser = await prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        institution: { select: { id: true, name: true, code: true } },
+        department: { select: { id: true, name: true, code: true } },
+        section: { select: { id: true, name: true, year: true, semester: true } },
+        educatorSections: {
+          include: { section: { select: { id: true, name: true, year: true, semester: true } } },
+        },
+      },
+    });
+
+    if (!updatedUser) {
+      throw ApiError.notFound('User not found');
+    }
+
+    return {
+      id: updatedUser.id,
+      email: updatedUser.email,
+      firstName: updatedUser.firstName,
+      lastName: updatedUser.lastName,
+      role: updatedUser.role,
+      institutionId: updatedUser.institution?.id,
+      institutionName: updatedUser.institution?.name,
+      departmentId: updatedUser.department?.id || updatedUser.departmentId,
+      departmentName: updatedUser.department?.name,
+      departmentCode: updatedUser.department?.code,
+      department: updatedUser.department,
+      studentId: updatedUser.studentId,
+      sectionId: updatedUser.section?.id || updatedUser.sectionId,
+      sectionName: updatedUser.section?.name,
+      employeeId: updatedUser.employeeId,
+      designation: updatedUser.designation,
+      assignedSections: updatedUser.educatorSections?.map(rel => rel.section.id) || [],
+      assignedSectionNames: updatedUser.educatorSections?.map(rel => rel.section.name).filter(Boolean) || [],
+      isActive: updatedUser.isActive,
+      lastLoginAt: updatedUser.lastLoginAt,
+      createdAt: updatedUser.createdAt,
     };
-
-    if (user.role === 'educator') {
-      response.employeeId = user.employeeId;
-      response.designation = user.designation;
-      response.assignedSections = updateData.assignedSections || [];
-    }
-
-    if (user.role === 'student') {
-      response.studentId = user.studentId;
-      response.sectionId = user.sectionId;
-    }
-
-    return response;
   }
 
   /**
