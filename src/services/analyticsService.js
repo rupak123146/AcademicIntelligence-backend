@@ -211,10 +211,6 @@ class AnalyticsService {
 
     const students = await prisma.user.findMany({
       where: studentsQuery,
-      include: {
-        department: { select: { name: true, code: true } },
-        section: { select: { name: true, code: true } },
-      },
       select: {
         id: true,
         firstName: true,
@@ -224,8 +220,8 @@ class AnalyticsService {
         rollNumber: true,
         profileCompleted: true,
         currentSemester: true,
-        department: true,
-        section: true,
+        department: { select: { name: true, code: true } },
+        section: { select: { name: true } },
       },
     });
 
@@ -262,32 +258,44 @@ class AnalyticsService {
       : 0;
 
     const studentPerformanceMap = {};
+    
+    // Initialize all students in the map first (with default values)
+    for (const student of students) {
+      studentPerformanceMap[student.id] = {
+        id: student.id,
+        firstName: student.firstName,
+        lastName: student.lastName,
+        email: student.email,
+        studentId: student.studentId,
+        rollNumber: student.rollNumber,
+        currentSemester: student.currentSemester,
+        department: student.department,
+        section: student.section,
+        scores: [],
+        examsAttempted: 0,
+        totalCorrect: 0,
+        totalWrong: 0,
+        passed: 0,
+        failed: 0,
+      };
+    }
+    
+    // Then add performance data from exam attempts
     for (const attempt of allAttempts) {
       const attemptStudentId = attempt.student?.id;
       if (!attemptStudentId) continue;
 
-      if (!studentPerformanceMap[attemptStudentId]) {
-        studentPerformanceMap[attemptStudentId] = {
-          id: attemptStudentId,
-          firstName: attempt.student.firstName,
-          lastName: attempt.student.lastName,
-          email: attempt.student.email,
-          scores: [],
-          examsAttempted: 0,
-          totalCorrect: 0,
-          totalWrong: 0,
-          passed: 0,
-          failed: 0,
-        };
-      }
-      studentPerformanceMap[attemptStudentId].scores.push(attempt.percentage || 0);
-      studentPerformanceMap[attemptStudentId].examsAttempted++;
-      studentPerformanceMap[attemptStudentId].totalCorrect += attempt.correctAnswers || 0;
-      studentPerformanceMap[attemptStudentId].totalWrong += attempt.wrongAnswers || 0;
-      if (attempt.passed) {
-        studentPerformanceMap[attemptStudentId].passed++;
-      } else {
-        studentPerformanceMap[attemptStudentId].failed++;
+      // Only update if student is in our map (exists in class)
+      if (studentPerformanceMap[attemptStudentId]) {
+        studentPerformanceMap[attemptStudentId].scores.push(attempt.percentage || 0);
+        studentPerformanceMap[attemptStudentId].examsAttempted++;
+        studentPerformanceMap[attemptStudentId].totalCorrect += attempt.correctAnswers || 0;
+        studentPerformanceMap[attemptStudentId].totalWrong += attempt.wrongAnswers || 0;
+        if (attempt.passed) {
+          studentPerformanceMap[attemptStudentId].passed++;
+        } else {
+          studentPerformanceMap[attemptStudentId].failed++;
+        }
       }
     }
 
@@ -296,11 +304,26 @@ class AnalyticsService {
       const scores = [...s.scores].sort((a, b) => b - a);
       const trend = scores.length >= 2 ? scores[0] - scores[scores.length - 1] : 0;
 
+      // Determine weak area based on performance
+      let weakArea = 'Good';
+      if (s.examsAttempted === 0) {
+        weakArea = 'No Attempts';
+      } else if (avg < 50) {
+        weakArea = 'Needs Improvement';
+      } else if (avg < 70) {
+        weakArea = 'Average';
+      }
+
       return {
         id: s.id,
         firstName: s.firstName,
         lastName: s.lastName,
         email: s.email,
+        studentId: s.studentId,
+        rollNumber: s.rollNumber,
+        currentSemester: s.currentSemester,
+        department: s.department,
+        section: s.section,
         averageScore: Math.round(avg * 100) / 100,
         examsAttempted: s.examsAttempted,
         examsTaken: s.examsAttempted,
@@ -311,13 +334,20 @@ class AnalyticsService {
         totalCorrect: s.totalCorrect,
         totalWrong: s.totalWrong,
         trend: Math.round(trend),
-        weakArea: avg < 50 ? 'Needs Improvement' : avg < 70 ? 'Average' : 'Good',
+        weakArea,
       };
     });
 
-    studentPerformance.sort((a, b) => b.averageScore - a.averageScore);
+    studentPerformance.sort((a, b) => {
+      // Sort by average score (but prioritize students with attempts)
+      if (a.examsAttempted === 0 && b.examsAttempted === 0) return 0;
+      if (a.examsAttempted === 0) return 1;
+      if (b.examsAttempted === 0) return -1;
+      return b.averageScore - a.averageScore;
+    });
 
-    const atRiskStudents = studentPerformance.filter((s) => s.averageScore < 60);
+    // At-risk students are those with attempts AND scoring below 60
+    const atRiskStudents = studentPerformance.filter((s) => s.examsAttempted > 0 && s.averageScore < 60);
 
     const examAnalytics = [];
     for (const exam of exams) {
