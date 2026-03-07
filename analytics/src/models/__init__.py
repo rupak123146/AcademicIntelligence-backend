@@ -57,9 +57,61 @@ from src.models.schemas import (
     APIResponse
 )
 
+from src.models.enhanced_models import (
+    # Enums
+    RiskLevel,
+    AnomalyType,
+    
+    # Risk Detection
+    RiskFactor,
+    StudentRiskProfile,
+    
+    # Personalized Feedback & Resources
+    Resource,
+    ResourceRecommendation,
+    
+    # Exam Proctoring
+    ExamActivity,
+    ProctorAlert,
+    RealTimeExamStatus,
+    
+    # Fairness
+    BiasIndicator,
+    FairnessAnalysis,
+    
+    # Item Analysis (Phase 2)
+    DifficultLevel,
+    DiscriminationLevel,
+    DistractorOption,
+    DistractorAnalysis,
+    ItemRecommendation,
+    ItemAnalysis,
+    ItemStatistics,
+    
+    # Audit & Compliance
+    AuditLog,
+    ComplianceReport,
+    
+    # Predictive
+    PerformanceForecast,
+    DropoutRisk,
+    
+    # Reporting
+    ReportSection,
+    AnalyticsReport,
+    
+    # Study Plans
+    StudyActivity,
+    PersonalizedStudyPlan,
+    
+    # Comparative
+    StudentComparison,
+    ClassComparison,
+)
+
 
 __all__ = [
-    # Enums
+    # Enums (original)
     "MasteryLevel",
     "DifficultyLevel",
     "GapSeverity",
@@ -110,5 +162,56 @@ __all__ = [
     "CompareStudentsRequest",
     
     # Response
-    "APIResponse"
+    "APIResponse",
+    
+    # New Enhanced Models
+    # Enums
+    "RiskLevel",
+    "AnomalyType",
+    
+    # Risk Detection
+    "RiskFactor",
+    "StudentRiskProfile",
+    
+    # Resources
+    "Resource",
+    "ResourceRecommendation",
+    
+    # Exam Proctoring
+    "ExamActivity",
+    "ProctorAlert",
+    "RealTimeExamStatus",
+    
+    # Fairness
+    "BiasIndicator",
+    "FairnessAnalysis",
+    
+    # Item Analysis (Phase 2)
+    "DifficultLevel",
+    "DiscriminationLevel",
+    "DistractorOption",
+    "DistractorAnalysis",
+    "ItemRecommendation",
+    "ItemAnalysis",
+    "ItemStatistics",
+    
+    # Audit & Compliance
+    "AuditLog",
+    "ComplianceReport",
+    
+    # Predictive
+    "PerformanceForecast",
+    "DropoutRisk",
+    
+    # Reporting
+    "ReportSection",
+    "AnalyticsReport",
+    
+    # Study Plans
+    "StudyActivity",
+    "PersonalizedStudyPlan",
+    
+    # Comparative
+    "StudentComparison",
+    "ClassComparison",
 ]

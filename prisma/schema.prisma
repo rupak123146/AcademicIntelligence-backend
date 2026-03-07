@@ -356,6 +356,7 @@ model Course {
   exams           Exam[]
   examAssignments ExamAssignment[]
   tasks           Task[]
+  goals           Goal[]              @relation("CourseGoals")
   Institution     Institution?        @relation(fields: [institutionId], references: [id])
   institutionId   String?
 
@@ -739,4 +740,155 @@ model ExamStudent {
 
   @@id([examId, studentId])
   @@map("exam_students")
+}
+
+// =====================================================
+// Phase 3: Goals, Notifications, and Interventions
+// =====================================================
+
+enum GoalStatus {
+  active
+  completed
+  cancelled
+  expired
+}
+
+enum GoalType {
+  score_improvement
+  concept_mastery
+  consistency
+  time_management
+}
+
+enum NotificationPriority {
+  low
+  medium
+  high
+  urgent
+}
+
+enum NotificationType {
+  exam_reminder
+  result_published
+  goal_milestone
+  intervention_alert
+  achievement_unlocked
+  deadline_approaching
+}
+
+enum InterventionStatus {
+  planned
+  active
+  completed
+  cancelled
+}
+
+enum InterventionType {
+  one_on_one_tutoring
+  group_study
+  additional_resources
+  peer_mentoring
+  remedial_classes
+}
+
+model Goal {
+  id           String     @id @default(cuid())
+  studentId    String
+  courseId     String
+  goalType     GoalType
+  targetValue  Float
+  currentValue Float      @default(0)
+  targetDate   DateTime
+  status       GoalStatus @default(active)
+  description  String?    @db.Text
+  metadata     Json?
+  
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  
+  course Course @relation("CourseGoals", fields: [courseId], references: [id])
+  
+  @@index([studentId, status])
+  @@index([courseId])
+  @@map("goals")
+}
+
+model Notification {
+  id               String               @id @default(cuid())
+  userId           String
+  courseId         String?
+  notificationType NotificationType
+  title            String
+  message          String               @db.Text
+  actionUrl        String?
+  priority         NotificationPriority @default(medium)
+  isRead           Boolean              @default(false)
+  readAt           DateTime?
+  metadata         Json?
+  
+  createdAt        DateTime @default(now())
+  
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreferences {
+  id                   String   @id @default(cuid())
+  studentId            String   @unique
+  examReminders        Boolean  @default(true)
+  resultNotifications  Boolean  @default(true)
+  goalMilestones       Boolean  @default(true)
+  interventionAlerts   Boolean  @default(true)
+  achievements         Boolean  @default(true)
+  emailNotifications   Boolean  @default(false)
+  preferences          Json?
+  
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  
+  @@map("notification_preferences")
+}
+
+model Intervention {
+  id                String             @id @default(cuid())
+  studentId         String
+  educatorId        String
+  courseId          String
+  interventionType  InterventionType
+  status            InterventionStatus @default(planned)
+  reason            String             @db.Text
+  plannedActions    String             @db.Text
+  targetMetrics     Json?
+  estimatedDuration Int?               // days
+  actualStartDate   DateTime?
+  completionDate    DateTime?
+  outcome           String?            @db.Text
+  notes             String?            @db.Text
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  checkins InterventionCheckin[]
+  
+  @@index([studentId, status])
+  @@index([educatorId, status])
+  @@index([courseId])
+  @@map("interventions")
+}
+
+model InterventionCheckin {
+  id              String   @id @default(cuid())
+  interventionId  String
+  progress        String   // on_track, improved, no_change, declined
+  observations    String   @db.Text
+  nextSteps       String?  @db.Text
+  metricsUpdate   Json?
+  
+  checkinDate     DateTime @default(now())
+  
+  intervention Intervention @relation(fields: [interventionId], references: [id], onDelete: Cascade)
+  
+  @@index([interventionId])
+  @@map("intervention_checkins")
 }

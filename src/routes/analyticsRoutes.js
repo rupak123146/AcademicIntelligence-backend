@@ -168,6 +168,26 @@ router.get('/student/trends',
 );
 
 /**
+ * @route POST /api/v1/analytics/feedback
+ * @desc Get personalized feedback (alternative POST endpoint)
+ * @access Private
+ */
+router.post('/feedback', 
+  authenticate,
+  analyticsController.getStudentFeedback
+);
+
+/**
+ * @route POST /api/v1/analytics/gaps
+ * @desc Get learning gaps (alternative POST endpoint)
+ * @access Private
+ */
+router.post('/gaps', 
+  authenticate,
+  analyticsController.getLearningGaps
+);
+
+/**
  * Educator Analytics Routes
  */
 

@@ -257,13 +257,33 @@ const examValidation = {
   ],
 
   update: [
-    rules.uuid('id'),
+    param('id')
+      .trim()
+      .isLength({ min: 8, max: 64 })
+      .withMessage('id must be a valid identifier'),
     rules.optionalString('title', 255),
     rules.optionalString('description', 2000),
     rules.optionalString('instructions', 5000),
+    body('examType')
+      .optional()
+      .isIn(['quiz', 'unit_test', 'internal', 'midterm', 'final', 'practice', 'assignment'])
+      .withMessage('Invalid exam type'),
     rules.optionalInt('durationMinutes', 1),
+    body('totalMarks')
+      .optional()
+      .isFloat({ min: 0.01 })
+      .withMessage('Total marks must be greater than 0'),
+    body('passingMarks')
+      .optional()
+      .isFloat({ min: 0 })
+      .withMessage('Passing marks must be non-negative'),
     rules.boolean('negativeMarking'),
+    body('negativeMarkValue').optional().isFloat({ min: 0 }).withMessage('Negative mark value must be non-negative'),
     rules.boolean('shuffleQuestions'),
+    rules.boolean('shuffleOptions'),
+    rules.boolean('showResult'),
+    rules.boolean('showAnswers'),
+    rules.optionalInt('maxAttempts', 1),
     rules.date('startTime'),
     rules.date('endTime'),
     validate,
@@ -297,9 +317,21 @@ const questionValidation = {
       .optional()
       .isIn(['easy', 'medium', 'hard', 'expert'])
       .withMessage('Invalid difficulty level'),
-    rules.uuid('subjectId', 'body').optional(),
-    rules.uuid('chapterId', 'body').optional(),
-    rules.uuid('conceptId', 'body').optional(),
+    body('subjectId')
+      .optional()
+      .trim()
+      .isLength({ min: 8, max: 64 })
+      .withMessage('subjectId must be a valid identifier'),
+    body('chapterId')
+      .optional()
+      .trim()
+      .isLength({ min: 8, max: 64 })
+      .withMessage('chapterId must be a valid identifier'),
+    body('conceptId')
+      .optional()
+      .trim()
+      .isLength({ min: 8, max: 64 })
+      .withMessage('conceptId must be a valid identifier'),
     rules.optionalString('explanation', 2000),
     rules.optionalInt('orderIndex', 1),
     validate,

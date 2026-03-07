@@ -1,5 +1,7 @@
 const analyticsService = require('../services/analyticsService');
+const pythonAnalyticsClient = require('../services/pythonAnalyticsClient');
 const { successResponse, asyncHandler } = require('../utils/helpers');
+const logger = require('../utils/logger');
 
 /**
  * Get student dashboard
@@ -19,9 +21,15 @@ const getStudentDashboard = asyncHandler(async (req, res) => {
  * GET /api/v1/analytics/student/chapter-wise
  */
 const getChapterWiseAnalytics = asyncHandler(async (req, res) => {
-  const { courseId } = req.query;
-  const analytics = await analyticsService.getChapterAnalysis(req.user.id, courseId);
-  successResponse(res, 200, 'Chapter-wise analytics retrieved successfully', { chapters: analytics });
+  const { courseId, examId } = req.query;
+  try {
+    const analytics = await pythonAnalyticsClient.getChapterAnalysis(req.user.id, courseId, examId);
+    successResponse(res, 200, 'Chapter-wise analytics retrieved successfully', analytics);
+  } catch (error) {
+    logger.error('Failed to get chapter analytics from Python service, falling back to MySQL:', error);
+    const analytics = await analyticsService.getChapterAnalysis(req.user.id, courseId);
+    successResponse(res, 200, 'Chapter-wise analytics retrieved successfully', { chapters: analytics });
+  }
 });
 
 /**
@@ -30,12 +38,14 @@ const getChapterWiseAnalytics = asyncHandler(async (req, res) => {
  */
 const getConceptWiseAnalytics = asyncHandler(async (req, res) => {
   const { courseId, chapterId } = req.query;
-  let analytics = await analyticsService.getChapterAnalysis(req.user.id, courseId);
-  // Filter to specific chapter if provided
-  if (chapterId) {
-    analytics = analytics.filter(c => c.chapterId === chapterId);
+  try {
+    const analytics = await pythonAnalyticsClient.getConceptAnalysis(req.user.id, courseId, chapterId);
+    successResponse(res, 200, 'Concept-wise analytics retrieved successfully', analytics);
+  } catch (error) {
+    logger.error('Failed to get concept analytics from Python service, falling back to MySQL:', error);
+    const analytics = await analyticsService.getConceptAnalysis(req.user.id, courseId, chapterId);
+    successResponse(res, 200, 'Concept-wise analytics retrieved successfully', { concepts: analytics });
   }
-  successResponse(res, 200, 'Concept-wise analytics retrieved successfully', { chapters: analytics });
 });
 
 /**
@@ -43,29 +53,55 @@ const getConceptWiseAnalytics = asyncHandler(async (req, res) => {
  * GET /api/v1/analytics/student/difficulty-wise
  */
 const getDifficultyWiseAnalytics = asyncHandler(async (req, res) => {
-  const { courseId } = req.query;
-  const analytics = await analyticsService.getDifficultyAnalysis(req.user.id, courseId);
-  successResponse(res, 200, 'Difficulty-wise analytics retrieved successfully', analytics);
+  const { courseId, examId } = req.query;
+  try {
+    const analytics = await pythonAnalyticsClient.getDifficultyAnalysis(req.user.id, courseId, examId);
+    successResponse(res, 200, 'Difficulty-wise analytics retrieved successfully', analytics);
+  } catch (error) {
+    logger.error('Failed to get difficulty analytics from Python service, falling back to MySQL:', error);
+    const analytics = await analyticsService.getDifficultyAnalysis(req.user.id, courseId);
+    successResponse(res, 200, 'Difficulty-wise analytics retrieved successfully', analytics);
+  }
 });
 
 /**
  * Get learning gaps
  * GET /api/v1/analytics/student/learning-gaps
+ * POST /api/v1/analytics/gaps
  */
 const getLearningGaps = asyncHandler(async (req, res) => {
-  const { courseId } = req.query;
-  const gaps = await analyticsService.getLearningGaps(req.user.id, courseId);
-  successResponse(res, 200, 'Learning gaps retrieved successfully', gaps);
+  // Support both GET (query) and POST (body)
+  const { courseId, studentId } = req.method === 'POST' ? req.body : req.query;
+  const userId = studentId || req.user.id;
+  
+  try {
+    const gaps = await pythonAnalyticsClient.getLearningGaps(userId, courseId);
+    successResponse(res, 200, 'Learning gaps retrieved successfully', gaps);
+  } catch (error) {
+    logger.error('Failed to get learning gaps from Python service, falling back to MySQL:', error);
+    const gaps = await analyticsService.getLearningGaps(userId, courseId);
+    successResponse(res, 200, 'Learning gaps retrieved successfully', gaps);
+  }
 });
 
 /**
  * Get student feedback
  * GET /api/v1/analytics/student/feedback
+ * POST /api/v1/analytics/feedback
  */
 const getStudentFeedback = asyncHandler(async (req, res) => {
-  const { examId } = req.query;
-  const feedback = await analyticsService.getStudentFeedback(req.user.id, examId);
-  successResponse(res, 200, 'Feedback retrieved successfully', feedback);
+  // Support both GET (query) and POST (body)
+  const { courseId, examId, studentId } = req.method === 'POST' ? req.body : req.query;
+  const userId = studentId || req.user.id;
+  
+  try {
+    const feedback = await pythonAnalyticsClient.getFeedback(userId, courseId, examId);
+    successResponse(res, 200, 'Feedback retrieved successfully', feedback);
+  } catch (error) {
+    logger.error('Failed to get feedback from Python service, falling back to MySQL:', error);
+    const feedback = await analyticsService.getStudentFeedback(userId, examId);
+    successResponse(res, 200, 'Feedback retrieved successfully', feedback);
+  }
 });
 
 /**
@@ -73,9 +109,15 @@ const getStudentFeedback = asyncHandler(async (req, res) => {
  * GET /api/v1/analytics/student/trends
  */
 const getPerformanceTrends = asyncHandler(async (req, res) => {
-  const { courseId } = req.query;
-  const trend = await analyticsService.getPerformanceTrend(req.user.id, courseId);
-  successResponse(res, 200, 'Performance trends retrieved successfully', trend);
+  const { courseId, windowSize } = req.query;
+  try {
+    const trend = await pythonAnalyticsClient.getPerformanceTrend(req.user.id, courseId, windowSize);
+    successResponse(res, 200, 'Performance trends retrieved successfully', trend);
+  } catch (error) {
+    logger.error('Failed to get performance trends from Python service, falling back to MySQL:', error);
+    const trend = await analyticsService.getPerformanceTrend(req.user.id, courseId);
+    successResponse(res, 200, 'Performance trends retrieved successfully', trend);
+  }
 });
 
 /**
