@@ -381,6 +381,11 @@ class AttemptService {
     }
 
     const exam = await prisma.exam.findUnique({ where: { id: attempt.examId } });
+
+    if (userRole === 'student' && !exam.showResult) {
+      throw ApiError.forbidden('Results are not available yet. Your educator has disabled immediate result visibility.');
+    }
+
     const answers = await prisma.studentAnswer.findMany({
       where: { attemptId },
       include: { question: { include: { options: true } } },
@@ -399,6 +404,9 @@ class AttemptService {
       explanation: a.question.explanation,
     }));
 
+    // Convert seconds to minutes
+    const timeInMinutes = attempt.timeTaken ? Math.round(attempt.timeTaken / 60) : 0;
+    
     return {
       attemptId: attempt.id,
       examId: exam.id,
@@ -413,6 +421,8 @@ class AttemptService {
       wrongAnswers: attempt.wrongAnswers,
       skipped: attempt.skipped,
       timeTaken: formatDuration(attempt.timeTaken),
+      timeInMinutes: timeInMinutes,
+      timeInSeconds: attempt.timeTaken || 0,
       grade: attempt.grade,
       passed: attempt.passed,
       showAnswers: exam.showAnswers || userRole !== 'student',
@@ -454,6 +464,8 @@ class AttemptService {
       grade: a.grade,
       passed: a.passed,
       timeSpent: a.timeTaken,
+      timeInMinutes: a.timeTaken ? Math.round(a.timeTaken / 60) : 0,
+      timeFormatted: formatDuration(a.timeTaken),
     }));
 
     return {

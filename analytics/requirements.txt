@@ -1,6 +1,69 @@
 # 🐍 Analytics Engine Dependencies
 # Python 3.11+
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fi    echo "Training cancelled."else    echo "🔄 Restart analytics service to use new models"    echo ""    echo "   tensorboard --logdir=models/"    echo "📈 View training logs:"    echo ""    echo "   - models/feedback_generation_finetuned/best_model"    echo "   - models/risk_detection_finetuned/best_model"    echo "🤖 Trained models saved to:"    echo ""    echo "   - evaluation_results/feedback_quality_metrics.json"    echo "   - evaluation_results/risk_detection/"    echo "📊 Check evaluation results:"    echo ""    echo "✅ Training completed!"    echo "=================================================="    echo ""        python src/training/train_models.py    # Run trainingthenif [[ $REPLY =~ ^[Yy]$ ]]echo ""read -p "Continue? (y/n) " -n 1 -recho ""echo "This will take 1-3 hours depending on hardware."echo "🚀 Starting model training..."echo ""# Start trainingpython -c "import asyncio; from src.config.database import DatabaseConfig; asyncio.run(DatabaseConfig().connect())" 2>/dev/null && echo "✓ Database connected" || echo "❌ Database connection failed"echo "🔍 Checking database connection..."echo ""# Check database connectionpython -c "import torch; print('✓ GPU available: ' + str(torch.cuda.is_available())); print('  Device:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"echo "🔍 Checking GPU availability..."echo ""# Check GPU availabilitypip install -q tensorboard matplotlib seaborn plotlyecho "📦 Installing training dependencies..."echo ""# Install dependenciesecho "✓ Python version: $python_version"python_version=$(python --version 2>&1 | awk '{print $2}')# Check Python versionfi    exit 1    echo "❌ Error: Please run this script from backend/analytics directory"if [ ! -f "src/training/train_models.py" ]; then# Check if we're in the right directoryecho ""echo "=================================================="echo "🎓 Academic Intelligence Platform - Model Training"
 # ============================================
 # Web Framework
 # ============================================
@@ -18,9 +81,21 @@ numpy==1.26.4
 scipy==1.12.0
 
 # ============================================
-# Machine Learning
+# Machine Learning & NLP
 # ============================================
 scikit-learn==1.4.0
+transformers==4.37.2
+torch==2.2.1
+torchvision==0.17.1
+torchaudio==2.2.1
+sentence-transformers==2.2.2
+huggingface-hub==0.21.4
+
+# Model Training & Evaluation
+tensorboard==2.16.2
+matplotlib==3.8.2
+seaborn==0.13.2
+plotly==5.18.0
 
 # ============================================
 # Database Connections
@@ -82,3 +157,11 @@ mypy==1.8.0
 # ============================================
 mkdocs==1.5.3
 mkdocs-material==9.5.7
+
+# ============================================
+# Report Generation
+# ============================================
+reportlab==4.0.9
+openpyxl==3.1.2
+pypdf==3.17.4
+pillow==10.2.0

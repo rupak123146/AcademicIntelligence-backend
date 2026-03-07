@@ -166,7 +166,12 @@ class AnalyticsService {
     const answers = await prisma.studentAnswer.findMany({
       where: { attemptId: { in: attemptIds } },
       include: {
-        question: { include: { chapter: { select: { name: true } } } },
+        question: { 
+          include: { 
+            chapter: { select: { id: true, name: true, chapterNumber: true } },
+            subject: { select: { id: true, name: true, code: true } }
+          } 
+        },
       },
     });
 
@@ -175,16 +180,98 @@ class AnalyticsService {
       const chapter = answer.question?.chapter;
       if (!chapter) continue;
 
-      const chapterName = chapter.name;
-      if (!chapterStats[chapterName]) {
-        chapterStats[chapterName] = { correct: 0, total: 0 };
+      const chapterKey = chapter.id;
+      if (!chapterStats[chapterKey]) {
+        chapterStats[chapterKey] = { 
+          id: chapter.id,
+          name: chapter.name, 
+          chapterNumber: chapter.chapterNumber,
+          subjectId: answer.question?.subject?.id,
+          subjectName: answer.question?.subject?.name,
+          correct: 0, 
+          total: 0 
+        };
       }
-      chapterStats[chapterName].total++;
-      if (answer.isCorrect) chapterStats[chapterName].correct++;
+      chapterStats[chapterKey].total++;
+      if (answer.isCorrect) chapterStats[chapterKey].correct++;
     }
 
-    return Object.entries(chapterStats).map(([name, stats]) => ({
-      chapter: name,
+    return Object.values(chapterStats).map((stats) => ({
+      chapterId: stats.id,
+      chapter: stats.name,
+      name: stats.name,
+      chapterNumber: stats.chapterNumber,
+      subjectId: stats.subjectId,
+      subjectName: stats.subjectName,
+      score: calculatePercentage(stats.correct, stats.total),
+      accuracy: calculatePercentage(stats.correct, stats.total),
+      totalQuestions: stats.total,
+      correctAnswers: stats.correct,
+      target: 80,
+    }));
+  }
+
+  /**
+   * Get concept-wise analysis
+   */
+  async getConceptAnalysis(studentId, courseId = null, chapterId = null) {
+    const attempts = await prisma.examAttempt.findMany({
+      where: { studentId, status: { in: ['submitted', 'auto_submitted', 'graded'] } },
+      select: { id: true },
+    });
+
+    if (attempts.length === 0) return [];
+
+    const attemptIds = attempts.map((a) => a.id);
+    const answers = await prisma.studentAnswer.findMany({
+      where: { attemptId: { in: attemptIds } },
+      include: {
+        question: { 
+          include: { 
+            concept: { select: { id: true, name: true, difficultyLevel: true } },
+            chapter: { select: { id: true, name: true } },
+            subject: { select: { id: true, name: true } }
+          } 
+        },
+      },
+    });
+
+    const conceptStats = {};
+    for (const answer of answers) {
+      const concept = answer.question?.concept;
+      if (!concept) continue;
+
+      // Filter by chapter if specified
+      if (chapterId && answer.question?.chapter?.id !== chapterId) continue;
+
+      const conceptKey = concept.id;
+      if (!conceptStats[conceptKey]) {
+        conceptStats[conceptKey] = { 
+          id: concept.id,
+          name: concept.name,
+          difficultyLevel: concept.difficultyLevel,
+          chapterId: answer.question?.chapter?.id,
+          chapterName: answer.question?.chapter?.name,
+          subjectId: answer.question?.subject?.id,
+          subjectName: answer.question?.subject?.name,
+          correct: 0, 
+          total: 0 
+        };
+      }
+      conceptStats[conceptKey].total++;
+      if (answer.isCorrect) conceptStats[conceptKey].correct++;
+    }
+
+    return Object.values(conceptStats).map((stats) => ({
+      conceptId: stats.id,
+      concept: stats.name,
+      name: stats.name,
+      difficultyLevel: stats.difficultyLevel,
+      chapterId: stats.chapterId,
+      chapterName: stats.chapterName,
+      subjectId: stats.subjectId,
+      subjectName: stats.subjectName,
+      mastery: calculatePercentage(stats.correct, stats.total),
       accuracy: calculatePercentage(stats.correct, stats.total),
       totalQuestions: stats.total,
       correctAnswers: stats.correct,
@@ -216,6 +303,7 @@ class AnalyticsService {
         firstName: true,
         lastName: true,
         email: true,
+        phoneNumber: true,
         studentId: true,
         rollNumber: true,
         profileCompleted: true,
@@ -266,6 +354,7 @@ class AnalyticsService {
         firstName: student.firstName,
         lastName: student.lastName,
         email: student.email,
+        phoneNumber: student.phoneNumber,
         studentId: student.studentId,
         rollNumber: student.rollNumber,
         currentSemester: student.currentSemester,
@@ -277,6 +366,7 @@ class AnalyticsService {
         totalWrong: 0,
         passed: 0,
         failed: 0,
+        examHistory: [],
       };
     }
     
@@ -296,6 +386,14 @@ class AnalyticsService {
         } else {
           studentPerformanceMap[attemptStudentId].failed++;
         }
+        // Add to exam history with time attended
+        const timeInMinutes = attempt.timeTaken ? Math.round(attempt.timeTaken / 60) : 0;
+        studentPerformanceMap[attemptStudentId].examHistory.push({
+          examTitle: attempt.exam?.title,
+          score: attempt.percentage || 0,
+          date: attempt.submittedAt || attempt.createdAt,
+          timeAttended: timeInMinutes,
+        });
       }
     }
 
@@ -314,11 +412,15 @@ class AnalyticsService {
         weakArea = 'Average';
       }
 
+      // Sort exam history by date, most recent first
+      const sortedExamHistory = s.examHistory.sort((a, b) => new Date(b.date) - new Date(a.date));
+
       return {
         id: s.id,
         firstName: s.firstName,
         lastName: s.lastName,
         email: s.email,
+        phoneNumber: s.phoneNumber,
         studentId: s.studentId,
         rollNumber: s.rollNumber,
         currentSemester: s.currentSemester,
@@ -335,6 +437,7 @@ class AnalyticsService {
         totalWrong: s.totalWrong,
         trend: Math.round(trend),
         weakArea,
+        examHistory: sortedExamHistory,
       };
     });
 
@@ -600,6 +703,204 @@ class AnalyticsService {
             ? 'Moderate gaps. Practice more problems.'
             : 'Minor gaps. Focus on advanced concepts.',
       }));
+  }
+
+  /**
+   * Get personalized feedback for a student
+   */
+  async getStudentFeedback(studentId, examId = null) {
+    const where = {
+      studentId,
+      status: { in: ['submitted', 'auto_submitted', 'graded'] },
+    };
+
+    if (examId) {
+      where.examId = examId;
+    }
+
+    const attempts = await prisma.examAttempt.findMany({
+      where,
+      orderBy: { submittedAt: 'desc' },
+      include: {
+        exam: {
+          select: {
+            id: true,
+            title: true,
+          },
+        },
+      },
+    });
+
+    if (attempts.length === 0) {
+      return {
+        overallFeedback: 'No exam attempts found yet. Complete an exam to receive personalized insights.',
+        strengths: [],
+        weaknesses: [],
+        recommendations: [
+          {
+            type: 'recommendation',
+            priority: 'medium',
+            message: 'Start with one practice exam to build a baseline performance profile.',
+            actionable: true,
+            metadata: { estimatedTime: 45 },
+          },
+        ],
+        nextSteps: [
+          'Attempt an exam in your current course.',
+          'Review chapter-level performance after submission.',
+          'Create a goal based on your first result.',
+        ],
+        estimatedImprovementTime: 14,
+        confidenceScore: 0.3,
+      };
+    }
+
+    const avgPercentage = attempts.reduce((sum, attempt) => sum + (attempt.percentage || 0), 0) / attempts.length;
+    const latestAttempt = attempts[0];
+    const passCount = attempts.filter((attempt) => attempt.passed).length;
+    const passRate = calculatePercentage(passCount, attempts.length);
+
+    const attemptIds = attempts.map((attempt) => attempt.id);
+    const answers = await prisma.studentAnswer.findMany({
+      where: { attemptId: { in: attemptIds } },
+      include: {
+        question: {
+          include: {
+            chapter: {
+              select: {
+                id: true,
+                name: true,
+              },
+            },
+          },
+        },
+      },
+    });
+
+    const chapterStats = {};
+    for (const answer of answers) {
+      const chapterName = answer.question?.chapter?.name;
+      if (!chapterName) continue;
+
+      if (!chapterStats[chapterName]) {
+        chapterStats[chapterName] = { total: 0, correct: 0 };
+      }
+
+      chapterStats[chapterName].total += 1;
+      if (answer.isCorrect) {
+        chapterStats[chapterName].correct += 1;
+      }
+    }
+
+    const chapterAccuracy = Object.entries(chapterStats).map(([chapter, stats]) => ({
+      chapter,
+      accuracy: calculatePercentage(stats.correct, stats.total),
+      total: stats.total,
+    }));
+
+    chapterAccuracy.sort((a, b) => b.accuracy - a.accuracy);
+    const topChapter = chapterAccuracy[0];
+    const weakChapters = [...chapterAccuracy].sort((a, b) => a.accuracy - b.accuracy).slice(0, 2);
+
+    const strengths = [];
+    const weaknesses = [];
+    const recommendations = [];
+
+    if (avgPercentage >= 75) {
+      strengths.push({
+        type: 'performance',
+        priority: 'low',
+        message: `Your average score is ${Math.round(avgPercentage)}%, showing strong overall performance.`,
+        actionable: false,
+      });
+    } else if (avgPercentage >= 60) {
+      strengths.push({
+        type: 'performance',
+        priority: 'low',
+        message: `You are maintaining a steady average of ${Math.round(avgPercentage)}%. Keep building consistency.`,
+        actionable: true,
+      });
+    }
+
+    if (topChapter && topChapter.total >= 3) {
+      strengths.push({
+        type: 'chapter',
+        priority: 'low',
+        message: `Strong mastery in ${topChapter.chapter} with ${topChapter.accuracy}% accuracy.`,
+        actionable: false,
+      });
+    }
+
+    if (avgPercentage < 60) {
+      weaknesses.push({
+        type: 'performance',
+        priority: 'high',
+        message: `Average score is ${Math.round(avgPercentage)}%. Focused revision is needed to reach a safe range.`,
+        actionable: true,
+      });
+    }
+
+    for (const chapter of weakChapters) {
+      if (chapter.accuracy < 60) {
+        weaknesses.push({
+          type: 'chapter',
+          priority: chapter.accuracy < 40 ? 'high' : 'medium',
+          message: `Low accuracy in ${chapter.chapter} (${chapter.accuracy}%).`,
+          actionable: true,
+        });
+
+        recommendations.push({
+          type: 'practice',
+          priority: chapter.accuracy < 40 ? 'high' : 'medium',
+          message: `Practice ${chapter.chapter} with targeted question sets and concept review.`,
+          actionable: true,
+          metadata: {
+            chapter: chapter.chapter,
+            estimatedTime: chapter.accuracy < 40 ? 90 : 60,
+          },
+        });
+      }
+    }
+
+    if (latestAttempt?.exam?.title) {
+      recommendations.push({
+        type: 'exam-review',
+        priority: 'medium',
+        message: `Review mistakes from your latest attempt: ${latestAttempt.exam.title}.`,
+        actionable: true,
+        metadata: { estimatedTime: 30 },
+      });
+    }
+
+    if (recommendations.length === 0) {
+      recommendations.push({
+        type: 'consistency',
+        priority: 'low',
+        message: 'Continue regular practice to maintain momentum and accuracy.',
+        actionable: true,
+        metadata: { estimatedTime: 30 },
+      });
+    }
+
+    const overallFeedback = avgPercentage >= 75
+      ? `Great job. You are performing well with an average score of ${Math.round(avgPercentage)}% and a pass rate of ${passRate}%.`
+      : avgPercentage >= 60
+        ? `You are on track with an average score of ${Math.round(avgPercentage)}%. Focus on weaker chapters to move into a high-performance band.`
+        : `You are currently averaging ${Math.round(avgPercentage)}%. A focused improvement plan can quickly raise your performance.`;
+
+    return {
+      overallFeedback,
+      strengths,
+      weaknesses,
+      recommendations,
+      nextSteps: [
+        'Review your weakest chapter from this feedback.',
+        'Complete one targeted practice session today.',
+        'Re-attempt a quiz and compare your score trend.',
+      ],
+      estimatedImprovementTime: avgPercentage < 60 ? 21 : 14,
+      confidenceScore: Math.min(0.95, Math.max(0.4, attempts.length / 10)),
+    };
   }
 
   /**

@@ -10,6 +10,16 @@ const settingsRoutes = require('./settingsRoutes');
 const userRoutes = require('./userRoutes');
 const taskRoutes = require('./taskRoutes');
 
+// Phase 3 route modules
+const goalRoutes = require('./goalRoutes');
+const notificationRoutes = require('./notificationRoutes');
+const interventionRoutes = require('./interventionRoutes');
+
+// Subject, Chapter, Concept route modules
+const subjectRoutes = require('./subjectRoutes');
+const chapterRoutes = require('./chapterRoutes');
+const conceptRoutes = require('./conceptRoutes');
+
 // API welcome/info endpoint
 router.get('/', (req, res) => {
   res.status(200).json({
@@ -23,6 +33,12 @@ router.get('/', (req, res) => {
       analytics: '/api/v1/analytics',
       users: '/api/v1/users',
       tasks: '/api/v1/tasks',
+      goals: '/api/v1/goals',
+      notifications: '/api/v1/notifications',
+      interventions: '/api/v1/interventions',
+      subjects: '/api/v1/subjects',
+      chapters: '/api/v1/chapters',
+      concepts: '/api/v1/concepts',
       health: '/api/v1/health',
       docs: '/api-docs',
     },
@@ -49,9 +65,14 @@ router.use('/settings', settingsRoutes);
 router.use('/users', userRoutes);
 router.use('/tasks', taskRoutes);
 
-// TODO: Add more routes
-// router.use('/courses', courseRoutes);
-// router.use('/questions', questionRoutes);
-// router.use('/institutions', institutionRoutes);
+// Mount Phase 3 routes
+router.use('/goals', goalRoutes);
+router.use('/notifications', notificationRoutes);
+router.use('/interventions', interventionRoutes);
+
+// Mount Subject, Chapter, Concept routes
+router.use('/subjects', subjectRoutes);
+router.use('/chapters', chapterRoutes);
+router.use('/concepts', conceptRoutes);
 
 module.exports = router;

@@ -310,14 +310,18 @@ class ExamService {
       throw ApiError.notFound('Student not found');
     }
 
+    logger.info('Student requesting available exams:', {
+      studentId,
+      sectionId: student.sectionId,
+      departmentId: student.departmentId,
+      institutionId: student.institutionId,
+    });
+
     const exams = await prisma.exam.findMany({
       where: {
         status: { in: ['published', 'active'] },
         institutionId: student.institutionId,
         AND: [
-          {
-            OR: [{ startTime: null }, { startTime: { lte: now } }],
-          },
           {
             OR: [{ endTime: null }, { endTime: { gte: now } }],
           },
@@ -335,6 +339,12 @@ class ExamService {
       orderBy: [{ startTime: 'asc' }, { createdAt: 'desc' }],
     });
 
+    logger.info(`Found ${exams.length} available exams for student:`, {
+      studentId,
+      examIds: exams.map(e => e.id),
+      examTitles: exams.map(e => ({ id: e.id, title: e.title, mode: e.assignmentMode })),
+    });
+
     const examResponses = await Promise.all(exams.map(async (exam) => {
       const attempts = await prisma.examAttempt.findMany({
         where: { examId: exam.id, studentId },
@@ -345,6 +355,7 @@ class ExamService {
       const canAttempt = attemptCount < (exam.maxAttempts || 1);
       const lastAttempt = attempts[0];
       const activeAttempt = attempts.find((a) => ['started', 'in_progress'].includes(a.status));
+      const notStartedYet = exam.startTime ? new Date(exam.startTime) > now : false;
 
       return {
         ...this.formatExamResponse(exam),
@@ -353,7 +364,8 @@ class ExamService {
         creatorName: exam.createdBy ? `${exam.createdBy.firstName} ${exam.createdBy.lastName}` : 'Unknown',
         questionCount: exam._count?.questions || 0,
         attemptCount,
-        canAttempt: canAttempt && !activeAttempt,
+        canAttempt: canAttempt && !activeAttempt && !notStartedYet,
+        isUpcoming: notStartedYet,
         hasActiveAttempt: !!activeAttempt,
         lastAttemptStatus: lastAttempt?.status,
         lastAttemptScore: lastAttempt?.percentage,
@@ -532,7 +544,16 @@ class ExamService {
   async publishExam(examId, userId, userRole) {
     const exam = await prisma.exam.findUnique({
       where: { id: examId },
-      include: { _count: { select: { questions: true } } },
+      include: { 
+        _count: { 
+          select: { 
+            questions: true,
+            examSections: true,
+            examDepartments: true,
+            examStudents: true,
+          } 
+        } 
+      },
     });
     if (!exam) {
       throw ApiError.notFound('Exam not found');
@@ -550,6 +571,28 @@ class ExamService {
 
     if (exam._count.questions === 0) {
       throw ApiError.badRequest('Cannot publish exam without questions');
+    }
+
+    const now = new Date();
+    if (exam.endTime && new Date(exam.endTime) <= now) {
+      throw ApiError.badRequest('Cannot publish exam because end time is already in the past');
+    }
+
+    if (exam.startTime && exam.endTime && new Date(exam.startTime) >= new Date(exam.endTime)) {
+      throw ApiError.badRequest('Cannot publish exam because start time must be before end time');
+    }
+
+    // Validate that exam is assigned to someone
+    const hasAssignments = 
+      exam.assignmentMode === 'all' ||
+      exam._count.examSections > 0 ||
+      exam._count.examDepartments > 0 ||
+      exam._count.examStudents > 0;
+
+    if (!hasAssignments) {
+      throw ApiError.badRequest(
+        'Cannot publish exam without assignments. Please go to Assignment tab and select sections, departments, or change assignment mode to "All Students"'
+      );
     }
 
     const updated = await prisma.exam.update({
@@ -660,6 +703,17 @@ class ExamService {
    */
   async assignExam(examId, assignmentData, userId, userRole) {
     const { sectionIds, departmentIds, studentIds, assignmentMode } = assignmentData;
+    const normalizedSectionIds = Array.isArray(sectionIds) ? sectionIds : undefined;
+    const normalizedDepartmentIds = Array.isArray(departmentIds) ? departmentIds : undefined;
+    const normalizedStudentIds = Array.isArray(studentIds) ? studentIds : undefined;
+
+    logger.info('Assigning exam:', {
+      examId,
+      assignmentData,
+      sectionIds: normalizedSectionIds,
+      departmentIds: normalizedDepartmentIds,
+      assignmentMode,
+    });
 
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
     if (!exam) {
@@ -676,43 +730,77 @@ class ExamService {
       }
     }
 
-    await prisma.$transaction(async (tx) => {
-      if (sectionIds) {
-        await tx.examSection.deleteMany({ where: { examId } });
-        if (sectionIds.length > 0) {
-          await tx.examSection.createMany({
-            data: sectionIds.map((sectionId) => ({ examId, sectionId })),
+    // Use a batched transaction (array form) to avoid long interactive transaction timeouts.
+    const txOps = [];
+
+    if (normalizedSectionIds !== undefined) {
+      txOps.push(prisma.examSection.deleteMany({ where: { examId } }));
+      if (normalizedSectionIds.length > 0) {
+        txOps.push(
+          prisma.examSection.createMany({
+            data: normalizedSectionIds.map((sectionId) => ({ examId, sectionId })),
             skipDuplicates: true,
-          });
-        }
+          })
+        );
       }
-      if (departmentIds) {
-        await tx.examDepartment.deleteMany({ where: { examId } });
-        if (departmentIds.length > 0) {
-          await tx.examDepartment.createMany({
-            data: departmentIds.map((departmentId) => ({ examId, departmentId })),
+    }
+
+    if (normalizedDepartmentIds !== undefined) {
+      txOps.push(prisma.examDepartment.deleteMany({ where: { examId } }));
+      if (normalizedDepartmentIds.length > 0) {
+        txOps.push(
+          prisma.examDepartment.createMany({
+            data: normalizedDepartmentIds.map((departmentId) => ({ examId, departmentId })),
             skipDuplicates: true,
-          });
-        }
+          })
+        );
       }
-      if (studentIds) {
-        await tx.examStudent.deleteMany({ where: { examId } });
-        if (studentIds.length > 0) {
-          await tx.examStudent.createMany({
-            data: studentIds.map((studentId) => ({ examId, studentId })),
+    }
+
+    if (normalizedStudentIds !== undefined) {
+      txOps.push(prisma.examStudent.deleteMany({ where: { examId } }));
+      if (normalizedStudentIds.length > 0) {
+        txOps.push(
+          prisma.examStudent.createMany({
+            data: normalizedStudentIds.map((studentId) => ({ examId, studentId })),
             skipDuplicates: true,
-          });
-        }
+          })
+        );
       }
-      if (assignmentMode) {
-        await tx.exam.update({ where: { id: examId }, data: { assignmentMode } });
-      }
-    });
+    }
+
+    if (assignmentMode) {
+      txOps.push(prisma.exam.update({ where: { id: examId }, data: { assignmentMode } }));
+    }
+
+    if (txOps.length > 0) {
+      await prisma.$transaction(txOps);
+    }
+
+    if (normalizedSectionIds !== undefined) {
+      logger.info(`Updated section assignments count: ${normalizedSectionIds.length}`);
+    }
+    if (normalizedDepartmentIds !== undefined) {
+      logger.info(`Updated department assignments count: ${normalizedDepartmentIds.length}`);
+    }
+    if (normalizedStudentIds !== undefined) {
+      logger.info(`Updated student assignments count: ${normalizedStudentIds.length}`);
+    }
+    if (assignmentMode) {
+      logger.info(`Updated assignment mode to: ${assignmentMode}`);
+    }
 
     await deleteCache(CacheKeys.examDetails(examId));
     const updated = await prisma.exam.findUnique({
       where: { id: examId },
       include: this.buildExamIncludes(false),
+    });
+
+    logger.info('Exam assignment completed:', {
+      examId,
+      assignedSections: updated.examSections?.map(s => s.sectionId),
+      assignedDepartments: updated.examDepartments?.map(d => d.departmentId),
+      assignmentMode: updated.assignmentMode,
     });
 
     return this.formatExamResponse(updated);

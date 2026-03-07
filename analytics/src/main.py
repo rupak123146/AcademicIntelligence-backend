@@ -12,6 +12,8 @@ import uvicorn
 
 from src.config import settings, db
 from src.api import analytics_router
+from src.api.enhanced_routes import router as enhanced_router
+from src.models.huggingface_models import get_model_manager
 from src.services import initialize_all_services
 from src.utils import logger
 
@@ -29,6 +31,11 @@ async def lifespan(app: FastAPI):
         # Initialize database connections
         await db.init_all()
         logger.info("✅ Database connections established")
+        
+        # Initialize Hugging Face models (ML-powered features)
+        logger.info("💾 Loading Hugging Face models...")
+        model_manager = await get_model_manager()
+        logger.info("✅ Hugging Face models loaded")
         
         # Initialize all services
         await initialize_all_services()
@@ -199,6 +206,7 @@ async def ready_check():
 
 # Include analytics routes
 app.include_router(analytics_router, prefix="/api/v1")
+app.include_router(enhanced_router)
 
 
 # =====================================================

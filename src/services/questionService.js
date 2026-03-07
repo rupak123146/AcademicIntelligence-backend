@@ -27,28 +27,35 @@ class QuestionService {
       tags,
     } = data;
 
-    // Validate subject exists
-    if (subjectId) {
-      const subject = await prisma.subject.findUnique({
-        where: { id: subjectId },
-      });
-      if (!subject) {
-        throw ApiError.notFound('Subject not found');
-      }
+    if (!subjectId || !chapterId || !conceptId) {
+      throw ApiError.badRequest('Subject, chapter, and concept are mandatory for performance tracking');
     }
 
-    // Validate chapter exists
-    if (chapterId) {
-      const chapter = await prisma.chapter.findUnique({
-        where: { id: chapterId },
-      });
-      if (!chapter) {
-        throw ApiError.notFound('Chapter not found');
-      }
+    // Validate taxonomy and hierarchy integrity
+    const [subject, chapter, concept] = await Promise.all([
+      prisma.subject.findUnique({ where: { id: subjectId } }),
+      prisma.chapter.findUnique({ where: { id: chapterId } }),
+      prisma.concept.findUnique({ where: { id: conceptId } }),
+    ]);
+
+    if (!subject) {
+      throw ApiError.notFound('Subject not found');
+    }
+    if (!chapter) {
+      throw ApiError.notFound('Chapter not found');
+    }
+    if (!concept) {
+      throw ApiError.notFound('Concept not found');
+    }
+    if (chapter.subjectId !== subjectId) {
+      throw ApiError.badRequest('Selected chapter does not belong to selected subject');
+    }
+    if (concept.chapterId !== chapterId) {
+      throw ApiError.badRequest('Selected concept does not belong to selected chapter');
     }
 
     // Validate options for MCQ
-    if (['mcq', 'multiple'].includes(questionType)) {
+    if (['mcq', 'multiple', 'multiple_choice'].includes(questionType)) {
       if (!options || options.length < 2) {
         throw ApiError.badRequest('MCQ questions must have at least 2 options');
       }
@@ -193,6 +200,36 @@ class QuestionService {
       if (user.role !== 'admin') {
         throw ApiError.forbidden('You can only update your own questions');
       }
+    }
+
+    const finalSubjectId = data.subjectId !== undefined ? data.subjectId : question.subjectId;
+    const finalChapterId = data.chapterId !== undefined ? data.chapterId : question.chapterId;
+    const finalConceptId = data.conceptId !== undefined ? data.conceptId : question.conceptId;
+
+    if (!finalSubjectId || !finalChapterId || !finalConceptId) {
+      throw ApiError.badRequest('Subject, chapter, and concept are mandatory for performance tracking');
+    }
+
+    const [subject, chapter, concept] = await Promise.all([
+      prisma.subject.findUnique({ where: { id: finalSubjectId } }),
+      prisma.chapter.findUnique({ where: { id: finalChapterId } }),
+      prisma.concept.findUnique({ where: { id: finalConceptId } }),
+    ]);
+
+    if (!subject) {
+      throw ApiError.notFound('Subject not found');
+    }
+    if (!chapter) {
+      throw ApiError.notFound('Chapter not found');
+    }
+    if (!concept) {
+      throw ApiError.notFound('Concept not found');
+    }
+    if (chapter.subjectId !== finalSubjectId) {
+      throw ApiError.badRequest('Selected chapter does not belong to selected subject');
+    }
+    if (concept.chapterId !== finalChapterId) {
+      throw ApiError.badRequest('Selected concept does not belong to selected chapter');
     }
 
     // Update fields
