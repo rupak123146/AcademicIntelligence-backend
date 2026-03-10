@@ -7,6 +7,11 @@ const { prisma } = require('../config/database');
 const { setCache, getCache, deleteCache, CacheKeys } = require('../config/redis');
 const { ApiError, calculatePercentage, formatDuration } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const { invalidateOnAttemptSubmit } = require('./cacheInvalidationService');
+const { emitToExamRoom } = require('./realtimeGateway');
+const { createNotification } = require('./notificationService');
+const { getFlagValue } = require('./featureFlagService');
+const analyticsService = require('./analyticsService');
 
 class AttemptService {
   async getExamWithQuestions(examId) {
@@ -21,7 +26,7 @@ class AttemptService {
   }
 
   /**
-   * Start an exam attempt
+   * Start an exam attempt - with race condition protection
    */
   async startAttempt(examId, studentId, metadata = {}) {
     const exam = await this.getExamWithQuestions(examId);
@@ -41,6 +46,20 @@ class AttemptService {
       throw ApiError.badRequest(`Exam is not available. Current status: ${exam.status}`);
     }
 
+    // Check student profile completion (Issue #10)
+    const student = await prisma.user.findUnique({
+      where: { id: studentId },
+      select: { profileCompleted: true, institutionId: true },
+    });
+    if (!student?.profileCompleted) {
+      throw ApiError.badRequest('Please complete your profile before attempting exams');
+    }
+
+    // Verify institution match for security (Issue #3)
+    if (exam.institutionId && exam.institutionId !== student.institutionId) {
+      throw ApiError.forbidden('You cannot attempt exams from other institutions');
+    }
+
     const now = new Date();
     if (exam.startTime && new Date(exam.startTime) > now) {
       const startTime = new Date(exam.startTime).toLocaleString();
@@ -53,8 +72,17 @@ class AttemptService {
       throw ApiError.badRequest(`Exam has ended. It ended at ${endTime}`);
     }
 
+    // Check course enrollment and status (Issue #27)
     if (exam.courseId) {
       logger.info('Checking course enrollment:', { studentId, courseId: exam.courseId });
+      const course = await prisma.course.findUnique({
+        where: { id: exam.courseId },
+        select: { isActive: true },
+      });
+      if (!course?.isActive) {
+        throw ApiError.badRequest('This course is inactive. You cannot attempt its exams');
+      }
+
       const enrollment = await prisma.studentEnrollment.findFirst({
         where: { studentId, courseId: exam.courseId, status: 'enrolled' },
       });
@@ -64,33 +92,42 @@ class AttemptService {
       }
     }
 
-    const attemptCount = await prisma.examAttempt.count({
-      where: { examId, studentId },
-    });
-    logger.info('Previous attempts:', { examId, studentId, attemptCount, maxAttempts: exam.maxAttempts });
-    if (attemptCount >= exam.maxAttempts) {
-      throw ApiError.badRequest(`Maximum attempts reached. You have already attempted this exam ${attemptCount} time(s).`);
-    }
+    // Use transaction to prevent race condition (Issue #1)
+    const attempt = await prisma.$transaction(async (tx) => {
+      // Check for active attempt within transaction (atomic)
+      const activeAttempt = await tx.examAttempt.findFirst({
+        where: { examId, studentId, status: { in: ['started', 'in_progress'] } },
+      });
+      if (activeAttempt) {
+        logger.warn('Active attempt found:', { attemptId: activeAttempt.id, status: activeAttempt.status });
+        throw ApiError.badRequest('You have an active attempt. Please complete or submit it first.');
+      }
 
-    const activeAttempt = await prisma.examAttempt.findFirst({
-      where: { examId, studentId, status: { in: ['started', 'in_progress'] } },
-    });
-    if (activeAttempt) {
-      logger.warn('Active attempt found:', { attemptId: activeAttempt.id, status: activeAttempt.status });
-      throw ApiError.badRequest('You have an active attempt. Please complete or submit it first.');
-    }
+      // Get current max attempt number atomically
+      const lastAttempt = await tx.examAttempt.findFirst({
+        where: { examId, studentId },
+        orderBy: { attemptNumber: 'desc' },
+        select: { attemptNumber: true },
+      });
+      const nextAttemptNumber = (lastAttempt?.attemptNumber || 0) + 1;
 
-    const attempt = await prisma.examAttempt.create({
-      data: {
-        examId,
-        studentId,
-        attemptNumber: attemptCount + 1,
-        status: 'started',
-        ipAddress: metadata.ipAddress,
-        browserInfo: metadata.browserInfo || {},
-        maxScore: exam.totalMarks,
-      },
-    });
+      if (nextAttemptNumber > exam.maxAttempts) {
+        throw ApiError.badRequest(`Maximum attempts reached. You have already attempted this exam ${nextAttemptNumber - 1} time(s).`);
+      }
+
+      // Create attempt within transaction
+      return tx.examAttempt.create({
+        data: {
+          examId,
+          studentId,
+          attemptNumber: nextAttemptNumber,
+          status: 'started',
+          ipAddress: metadata.ipAddress,
+          browserInfo: metadata.browserInfo || {},
+          maxScore: exam.totalMarks,
+        },
+      });
+    }, { maxWait: 5000, timeout: 10000 }); // Transaction timeout
 
     let questions = exam.questions.map((rel) => rel.question);
     if (exam.shuffleQuestions) {
@@ -108,12 +145,11 @@ class AttemptService {
       });
     }
 
-    if (attemptCount === 0) {
-      await prisma.exam.updateMany({
-        where: { id: examId, status: 'published' },
-        data: { status: 'active' },
-      });
-    }
+    // Activate exam on first attempt
+    await prisma.exam.updateMany({
+      where: { id: examId, status: 'published' },
+      data: { status: 'active' },
+    }).catch(() => {}); // No error if already active or not published
 
     const endTime = new Date(attempt.startedAt);
     endTime.setMinutes(endTime.getMinutes() + exam.durationMinutes);
@@ -125,6 +161,15 @@ class AttemptService {
     }, exam.durationMinutes * 60 + 300);
 
     await this.logActivity(attempt.id, studentId, examId, 'exam_started', null, metadata);
+
+    if (getFlagValue('realtimeAnalytics')) {
+      emitToExamRoom(examId, 'attempt:started', {
+        attemptId: attempt.id,
+        examId,
+        studentId,
+        startedAt: attempt.startedAt,
+      });
+    }
 
     logger.info('Exam attempt started:', { attemptId: attempt.id, examId, studentId });
 
@@ -163,7 +208,7 @@ class AttemptService {
   }
 
   /**
-   * Save answer
+   * Save answer - with answer history tracking (Issue #26)
    */
   async saveAnswer(attemptId, questionId, answer, studentId, metadata = {}) {
     const attempt = await prisma.examAttempt.findFirst({
@@ -178,6 +223,7 @@ class AttemptService {
     const endTime = new Date(attempt.startedAt);
     endTime.setMinutes(endTime.getMinutes() + exam.durationMinutes);
 
+    // Issue #10: Attempt resumption validation - don't allow saving after time expires
     if (new Date() > endTime) {
       await this.autoSubmitAttempt(attemptId);
       throw ApiError.badRequest('Time expired. Exam has been auto-submitted.');
@@ -187,7 +233,29 @@ class AttemptService {
       where: { attemptId_questionId: { attemptId, questionId } },
     });
     const previousAnswer = existingAnswer?.selectedAnswer;
+    
+    // Issue #26: Build answer history (audit trail of changes)
+    let answerHistory = [];
+    if (existingAnswer?.answerHistory) {
+      try {
+        answerHistory = Array.isArray(existingAnswer.answerHistory) 
+          ? existingAnswer.answerHistory 
+          : JSON.parse(existingAnswer.answerHistory || '[]');
+      } catch (e) {
+        answerHistory = [];
+      }
+    }
+    
+    // Add current answer to history before updating
+    if (previousAnswer) {
+      answerHistory.push({
+        answer: previousAnswer,
+        timestamp: existingAnswer.updatedAt || new Date(),
+        timeSpent: existingAnswer.timeSpent || 0,
+      });
+    }
 
+    // Upsert answer with history tracking
     await prisma.studentAnswer.upsert({
       where: { attemptId_questionId: { attemptId, questionId } },
       update: {
@@ -195,6 +263,7 @@ class AttemptService {
         isAnswered: answer !== null && answer !== undefined,
         answeredAt: new Date(),
         timeSpent: metadata.timeSpent || 0,
+        answerHistory: answerHistory.length > 0 ? answerHistory : null,
       },
       create: {
         attemptId,
@@ -203,9 +272,11 @@ class AttemptService {
         isAnswered: answer !== null && answer !== undefined,
         answeredAt: new Date(),
         timeSpent: metadata.timeSpent || 0,
+        answerHistory: null, // No history for first answer
       },
     });
 
+    // Update attempt status if needed
     if (attempt.status === 'started') {
       await prisma.examAttempt.update({
         where: { id: attemptId },
@@ -213,6 +284,7 @@ class AttemptService {
       });
     }
 
+    // Log activity
     const eventType = previousAnswer ? 'answer_changed' : 'answer_submitted';
     await this.logActivity(attemptId, studentId, attempt.examId, eventType, questionId, {
       ...metadata,
@@ -220,7 +292,16 @@ class AttemptService {
       newAnswer: answer,
     });
 
-    logger.debug('Answer saved:', { attemptId, questionId });
+    if (getFlagValue('realtimeAnalytics')) {
+      emitToExamRoom(attempt.examId, 'attempt:answer_updated', {
+        attemptId,
+        questionId,
+        studentId,
+        eventType,
+      });
+    }
+
+    logger.debug('Answer saved:', { attemptId, questionId, hasHistory: answerHistory.length > 0 });
     return { success: true };
   }
 
@@ -247,7 +328,7 @@ class AttemptService {
   }
 
   /**
-   * Finalize and grade attempt
+   * Finalize and grade attempt - with proper negative marking handling (Issues #14, #27)
    */
   async finalizeAttempt(attemptId, submitType) {
     const attempt = await prisma.examAttempt.findUnique({
@@ -258,29 +339,64 @@ class AttemptService {
     }
 
     const exam = await prisma.exam.findUnique({ where: { id: attempt.examId } });
-    const answers = await prisma.studentAnswer.findMany({
-      where: { attemptId },
+
+    // Get ALL questions for the exam (not just ones with saved answers)
+    const examQuestions = await prisma.examQuestion.findMany({
+      where: { examId: attempt.examId },
       include: { question: { include: { options: true } } },
     });
+
+    // Get existing student answers
+    const existingAnswers = await prisma.studentAnswer.findMany({
+      where: { attemptId },
+    });
+    const answerMap = new Map(existingAnswers.map((a) => [a.questionId, a]));
 
     let totalScore = 0;
     let correctAnswers = 0;
     let wrongAnswers = 0;
     let skipped = 0;
 
-    for (const answer of answers) {
-      const question = answer.question;
+    for (const eq of examQuestions) {
+      const question = eq.question;
       if (!question) continue;
 
-      if (!answer.isAnswered || answer.selectedAnswer === null) {
+      const answer = answerMap.get(question.id);
+
+      if (!answer || !answer.isAnswered || answer.selectedAnswer === null) {
+        // Question was not answered (skipped or save failed)
         skipped++;
-        await prisma.studentAnswer.update({
-          where: { id: answer.id },
-          data: { isCorrect: false, marksAwarded: 0 },
-        });
+        if (answer) {
+          await prisma.studentAnswer.update({
+            where: { id: answer.id },
+            data: { isCorrect: false, marksAwarded: 0 },
+          });
+        } else {
+          // Create a record for unanswered question so it shows in results
+          await prisma.studentAnswer.create({
+            data: {
+              attemptId,
+              questionId: question.id,
+              selectedAnswer: null,
+              isAnswered: false,
+              isCorrect: false,
+              marksAwarded: 0,
+            },
+          });
+        }
       } else {
         const isCorrect = this.checkAnswer(question, answer.selectedAnswer);
         let marksAwarded = 0;
+
+        if (isCorrect === null) {
+          // Essay/descriptive: pending manual review — don't count as correct or wrong
+          await prisma.studentAnswer.update({
+            where: { id: answer.id },
+            data: { isCorrect: null, marksAwarded: 0 },
+          });
+          continue;
+        }
+
         if (isCorrect) {
           correctAnswers++;
           const marksValue = question.marks && question.marks > 0 ? question.marks : 1;
@@ -290,8 +406,11 @@ class AttemptService {
         } else {
           wrongAnswers++;
           if (exam.negativeMarking) {
-            marksAwarded = -(question.negativeMarks || exam.negativeMarkValue || 0);
+            // Issue #14, #27: Better calculation for negative marking
+            const negativeMarksValue = question.negativeMarks || exam.negativeMarkValue || 0;
+            marksAwarded = -negativeMarksValue;
             totalScore += marksAwarded;
+            logger.info(`Question answered incorrectly: ${question.id}, negative marks: ${marksAwarded}`);
           }
         }
 
@@ -302,8 +421,13 @@ class AttemptService {
       }
     }
 
-    const percentage = calculatePercentage(totalScore, exam.totalMarks);
-    const passed = percentage >= exam.passingPercentage;
+    // Issue #27: Ensure final score doesn't go below 0 for percentage calculation
+    const finalScore = Math.max(0, totalScore);
+    const percentage = calculatePercentage(finalScore, exam.totalMarks);
+    
+    // Issue #14, #27: Passing should be based on actual score, not just percentage
+    // But only if actual score is non-negative
+    const passed = totalScore >= 0 && percentage >= exam.passingPercentage;
     const grade = this.calculateGrade(percentage);
 
     const timeTaken = Math.floor((new Date() - new Date(attempt.startedAt)) / 1000);
@@ -313,7 +437,7 @@ class AttemptService {
       data: {
         status: submitType === 'auto_submitted' ? 'auto_submitted' : 'submitted',
         submittedAt: new Date(),
-        totalScore: Math.max(0, totalScore),
+        totalScore: finalScore, // Store bounded score
         percentage,
         correctAnswers,
         wrongAnswers,
@@ -325,14 +449,121 @@ class AttemptService {
     });
 
     await deleteCache(CacheKeys.activeAttempt(attempt.studentId, attempt.examId));
+    await invalidateOnAttemptSubmit(attempt.examId, attempt.studentId);
 
     await this.logActivity(attemptId, attempt.studentId, attempt.examId, 'exam_submitted', null, {
       submitType,
-      totalScore,
+      totalScore: finalScore,
+      rawScore: totalScore,
       percentage,
     });
 
-    logger.info('Exam attempt submitted:', { attemptId, totalScore, percentage, grade });
+    if (getFlagValue('realtimeAnalytics')) {
+      emitToExamRoom(attempt.examId, 'attempt:submitted', {
+        attemptId,
+        studentId: attempt.studentId,
+        examId: attempt.examId,
+        totalScore: finalScore,
+        percentage,
+        submitType,
+      });
+    }
+
+    if (getFlagValue('websocketNotifications')) {
+      await createNotification({
+        userId: attempt.studentId,
+        courseId: exam.courseId,
+        notificationType: 'result_published',
+        title: 'Exam Submitted Successfully',
+        message: `Your attempt for "${exam.title}" was submitted with score ${finalScore}/${exam.totalMarks}.`,
+        priority: 'medium',
+        actionUrl: `/student/results/${attemptId}`,
+        metadata: { examId: attempt.examId, attemptId },
+      }).catch((error) => {
+        logger.warn('Failed to create submission notification', { attemptId, error: error.message });
+      });
+
+      // Notify the exam creator (educator)
+      if (exam.createdById) {
+        const student = await prisma.user.findUnique({
+          where: { id: attempt.studentId },
+          select: { firstName: true, lastName: true, studentId: true },
+        });
+        const studentName = student ? `${student.firstName} ${student.lastName}` : 'A student';
+        const studentLabel = student?.studentId ? ` (${student.studentId})` : '';
+        await createNotification({
+          userId: exam.createdById,
+          courseId: exam.courseId,
+          notificationType: 'exam_submitted',
+          title: 'Exam Submission Received',
+          message: `${studentName}${studentLabel} submitted "${exam.title}" with score ${finalScore}/${exam.totalMarks} (${percentage}%).`,
+          priority: percentage < exam.passingPercentage ? 'high' : 'low',
+          actionUrl: `/educator/exams`,
+          metadata: { examId: attempt.examId, attemptId, studentId: attempt.studentId, percentage },
+        }).catch((error) => {
+          logger.warn('Failed to create educator submission notification', { attemptId, error: error.message });
+        });
+
+        // Low performance alert - separate notification when student fails
+        if (!passed && percentage < exam.passingPercentage) {
+          await createNotification({
+            userId: exam.createdById,
+            courseId: exam.courseId,
+            notificationType: 'low_performance_alert',
+            title: 'Low Performance Alert',
+            message: `${studentName}${studentLabel} scored ${percentage}% on "${exam.title}" (passing: ${exam.passingPercentage}%). Consider assigning an intervention.`,
+            priority: 'high',
+            actionUrl: `/educator/interventions`,
+            metadata: { examId: attempt.examId, attemptId, studentId: attempt.studentId, percentage, passingPercentage: exam.passingPercentage },
+          }).catch((error) => {
+            logger.warn('Failed to create low performance notification', { attemptId, error: error.message });
+          });
+        }
+
+        // Exam completion milestone - check how many assigned students have submitted
+        try {
+          const assignedStudentIds = await this._getAssignedStudentIds(exam);
+          if (assignedStudentIds.length > 0) {
+            const submittedCount = await prisma.examAttempt.count({
+              where: {
+                examId: exam.id,
+                studentId: { in: assignedStudentIds },
+                status: { in: ['submitted', 'auto_submitted'] },
+              },
+            });
+            const completionPct = Math.round((submittedCount / assignedStudentIds.length) * 100);
+
+            if (submittedCount === assignedStudentIds.length) {
+              await createNotification({
+                userId: exam.createdById,
+                courseId: exam.courseId,
+                notificationType: 'exam_completion_milestone',
+                title: 'All Students Completed Exam',
+                message: `All ${assignedStudentIds.length} assigned students have completed "${exam.title}".`,
+                priority: 'medium',
+                actionUrl: `/educator/exams`,
+                metadata: { examId: exam.id, totalStudents: assignedStudentIds.length, completionPct: 100 },
+              }).catch(() => {});
+            } else if (completionPct === 50) {
+              await createNotification({
+                userId: exam.createdById,
+                courseId: exam.courseId,
+                notificationType: 'exam_completion_milestone',
+                title: 'Exam 50% Complete',
+                message: `${submittedCount} of ${assignedStudentIds.length} students (50%) have completed "${exam.title}".`,
+                priority: 'low',
+                actionUrl: `/educator/exams`,
+                metadata: { examId: exam.id, totalStudents: assignedStudentIds.length, submittedCount, completionPct: 50 },
+              }).catch(() => {});
+            }
+          }
+        } catch (error) {
+          logger.warn('Failed to check exam completion milestone', { examId: exam.id, error: error.message });
+        }
+      }
+    }
+
+    logger.info('Exam attempt submitted:', { attemptId, totalScore: finalScore, rawScore: totalScore, percentage, grade });
 
     return {
       attemptId: updatedAttempt.id,
@@ -404,6 +635,14 @@ class AttemptService {
       explanation: a.question.explanation,
     }));
 
+    // Generate per-exam feedback inline
+    let feedback = null;
+    try {
+      feedback = await analyticsService.getStudentFeedback(attempt.studentId, attempt.examId);
+    } catch (err) {
+      logger.warn('Failed to generate inline feedback for result', { attemptId, error: err.message });
+    }
+
     // Convert seconds to minutes
     const timeInMinutes = attempt.timeTaken ? Math.round(attempt.timeTaken / 60) : 0;
     
@@ -427,6 +666,7 @@ class AttemptService {
       passed: attempt.passed,
       showAnswers: exam.showAnswers || userRole !== 'student',
       answers: detailedAnswers,
+      feedback,
     };
   }
 
@@ -502,53 +742,92 @@ class AttemptService {
   }
 
   /**
-   * Check if answer is correct
+   * Check if answer is correct - handles all question types robustly
    */
   checkAnswer(question, selectedAnswer) {
+    if (selectedAnswer === null || selectedAnswer === undefined) return false;
+
     switch (question.questionType) {
       case 'mcq':
+      case 'multiple':
       case 'multiple_choice':
-      case 'true_false':
+      case 'true_false': {
         if (question.options && question.options.length > 0) {
           const correctOption = question.options.find((opt) => opt.isCorrect);
           if (correctOption) {
-            const selectedId = selectedAnswer?.toString() || selectedAnswer;
-            const correctId = correctOption.id?.toString() || correctOption.id;
+            const selectedStr = String(selectedAnswer).trim();
+            const correctId = String(correctOption.id || '').trim();
+            const correctText = String(correctOption.text || '').trim();
 
-            if (selectedId && correctId) {
-              return selectedId === correctId;
-            }
-            return selectedAnswer === correctOption.text;
+            // 1. Match by option ID (primary - UUID match)
+            if (selectedStr === correctId) return true;
+
+            // 2. Match by option text (case-insensitive, handles 'true' vs 'True')
+            if (selectedStr.toLowerCase() === correctText.toLowerCase()) return true;
+
+            // 3. Check if selected answer matches ANY option by ID or text
+            const matchedOption = question.options.find((opt) => {
+              const optId = String(opt.id || '').trim();
+              const optText = String(opt.text || '').trim();
+              return selectedStr === optId || selectedStr.toLowerCase() === optText.toLowerCase();
+            });
+            if (matchedOption) return matchedOption.isCorrect;
+
+            return false;
           }
         }
-        return String(selectedAnswer || '').toLowerCase().trim() ===
-          String(question.correctAnswer || '').toLowerCase().trim();
+        // Fallback to correctAnswer field (for questions without options)
+        if (question.correctAnswer == null) return false;
+        return String(selectedAnswer).toLowerCase().trim() ===
+          String(question.correctAnswer).toLowerCase().trim();
+      }
 
-      case 'multiple':
-      case 'multiple_select':
+      case 'multiple_select': {
         if (question.options && question.options.length > 0) {
           const correctOptionIds = question.options
             .filter((opt) => opt.isCorrect)
-            .map((opt) => opt.id?.toString() || opt.id);
+            .map((opt) => String(opt.id || '').trim());
+          const correctOptionTexts = question.options
+            .filter((opt) => opt.isCorrect)
+            .map((opt) => String(opt.text || '').toLowerCase().trim());
 
           if (!Array.isArray(selectedAnswer)) return false;
 
-          const selectedIds = selectedAnswer.map((a) => (a?.toString ? a.toString() : a));
+          // Map each selected answer to the option it matches (by ID or text)
+          const matchedCorrectCount = selectedAnswer.filter((a) => {
+            const val = String(a).trim();
+            return correctOptionIds.includes(val) || correctOptionTexts.includes(val.toLowerCase());
+          }).length;
 
-          return selectedIds.length === correctOptionIds.length &&
-            selectedIds.every((id) => correctOptionIds.includes(id));
+          // All selected must be correct, and all correct must be selected
+          return matchedCorrectCount === correctOptionIds.length &&
+            selectedAnswer.length === correctOptionIds.length;
         }
         if (!Array.isArray(selectedAnswer) || !Array.isArray(question.correctAnswer)) {
           return false;
         }
         return selectedAnswer.length === question.correctAnswer.length &&
           selectedAnswer.every((a) => question.correctAnswer.includes(a));
+      }
 
-      case 'numerical':
-        return Math.abs(Number(selectedAnswer) - Number(question.correctAnswer)) < 0.001;
+      case 'numerical': {
+        if (question.correctAnswer == null) return false;
+        const selected = Number(selectedAnswer);
+        const correct = Number(question.correctAnswer);
+        if (isNaN(selected) || isNaN(correct)) return false;
+        return Math.abs(selected - correct) < 0.001;
+      }
 
-      case 'short_answer':
-        return selectedAnswer.toLowerCase().trim() === question.correctAnswer.toLowerCase().trim();
+      case 'short_answer': {
+        if (!selectedAnswer || !question.correctAnswer) return false;
+        return String(selectedAnswer).toLowerCase().trim() ===
+          String(question.correctAnswer).toLowerCase().trim();
+      }
+
+      case 'essay':
+      case 'descriptive':
+        // Essays require manual grading - return null to indicate pending review
+        return null;
 
       default:
         return false;
@@ -726,6 +1005,60 @@ class AttemptService {
   }
 
   /**
+   * Skip question (clear answer and mark as unanswered)
+   */
+  async skipQuestion(attemptId, questionId, studentId) {
+    if (!getFlagValue('skipQuestion')) {
+      throw ApiError.badRequest('Skip question feature is currently disabled');
+    }
+
+    const attempt = await prisma.examAttempt.findFirst({
+      where: { id: attemptId, studentId, status: { in: ['started', 'in_progress'] } },
+    });
+
+    if (!attempt) {
+      throw ApiError.notFound('Active attempt not found');
+    }
+
+    await prisma.studentAnswer.upsert({
+      where: { attemptId_questionId: { attemptId, questionId } },
+      update: {
+        selectedAnswer: null,
+        isAnswered: false,
+        isMarkedForReview: false,
+        answeredAt: null,
+        answerHistory: null,
+      },
+      create: {
+        attemptId,
+        questionId,
+        selectedAnswer: null,
+        isAnswered: false,
+        isMarkedForReview: false,
+      },
+    });
+
+    await this.logActivity(attemptId, studentId, attempt.examId, 'question_skipped', questionId);
+
+    if (getFlagValue('realtimeAnalytics')) {
+      emitToExamRoom(attempt.examId, 'attempt:question_skipped', {
+        attemptId,
+        questionId,
+        studentId,
+      });
+    }
+
+    logger.info('Question skipped:', { attemptId, questionId, studentId });
+
+    return {
+      success: true,
+      skipped: true,
+      questionId,
+      message: 'Question skipped successfully',
+    };
+  }
+
+  /**
    * Log exam activity
    */
   async logActivity(attemptId, studentId, examId, eventType, questionId = null, metadata = {}) {
@@ -749,6 +1082,56 @@ class AttemptService {
     } catch (error) {
       logger.error('Failed to log activity:', error);
     }
+  }
+
+  /**
+   * Get all student IDs assigned to an exam (via sections, departments, or direct assignment)
+   */
+  async _getAssignedStudentIds(exam) {
+    const studentIdSet = new Set();
+
+    // Direct student assignments
+    const directStudents = await prisma.examStudent.findMany({
+      where: { examId: exam.id },
+      select: { studentId: true },
+    });
+    directStudents.forEach(s => studentIdSet.add(s.studentId));
+
+    // Students from assigned sections
+    const examSections = await prisma.examSection.findMany({
+      where: { examId: exam.id },
+      select: { sectionId: true },
+    });
+    if (examSections.length > 0) {
+      const sectionStudents = await prisma.user.findMany({
+        where: {
+          role: 'student',
+          isActive: true,
+          sectionId: { in: examSections.map(s => s.sectionId) },
+        },
+        select: { id: true },
+      });
+      sectionStudents.forEach(s => studentIdSet.add(s.id));
+    }
+
+    // Students from assigned departments
+    const examDepts = await prisma.examDepartment.findMany({
+      where: { examId: exam.id },
+      select: { departmentId: true },
+    });
+    if (examDepts.length > 0) {
+      const deptStudents = await prisma.user.findMany({
+        where: {
+          role: 'student',
+          isActive: true,
+          departmentId: { in: examDepts.map(d => d.departmentId) },
+        },
+        select: { id: true },
+      });
+      deptStudents.forEach(s => studentIdSet.add(s.id));
+    }
+
+    return Array.from(studentIdSet);
   }
 }
 

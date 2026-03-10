@@ -136,7 +136,10 @@ class HuggingFaceModelManager:
             raise
 
     def _load_models_sync(self):
-        """Synchronous model loading"""
+        """Synchronous model loading with graceful fallback."""
+        loaded = 0
+        total = 4
+
         try:
             # Risk detection pipeline
             logger.info("Loading risk detection model...")
@@ -146,8 +149,12 @@ class HuggingFaceModelManager:
                 model=risk_model_id,
                 device=0 if self.device == "cuda" else -1
             )
-            logger.info(f"✅ Loaded: {risk_model_id}")
-            
+            loaded += 1
+            logger.info(f"Loaded: {risk_model_id}")
+        except Exception as e:
+            logger.warning(f"Risk detection model failed to load (metrics-based fallback active): {e}")
+
+        try:
             # Feedback generation pipeline
             logger.info("Loading feedback generation model...")
             feedback_model_id = self.model_configs[ModelType.FEEDBACK_GENERATION]["model_id"]
@@ -156,29 +163,37 @@ class HuggingFaceModelManager:
                 model=feedback_model_id,
                 device=0 if self.device == "cuda" else -1
             )
-            logger.info(f"✅ Loaded: {feedback_model_id}")
-            
+            loaded += 1
+            logger.info(f"Loaded: {feedback_model_id}")
+        except Exception as e:
+            logger.warning(f"Feedback generation model failed to load (rule-based fallback active): {e}")
+
+        try:
             # Resource recommendation model
             logger.info("Loading resource recommendation model...")
             self.models[ModelType.RESOURCE_RECOMMENDATION] = SentenceTransformer(
                 'sentence-transformers/all-MiniLM-L6-v2',
                 device=self.device
             )
-            logger.info("✅ Loaded: sentence-transformers/all-MiniLM-L6-v2")
-            
-            # Sentiment analysis (can reuse classification)
+            loaded += 1
+            logger.info("Loaded: sentence-transformers/all-MiniLM-L6-v2")
+        except Exception as e:
+            logger.warning(f"Resource recommendation model failed to load: {e}")
+
+        try:
+            # Sentiment analysis
             logger.info("Loading sentiment analyzer...")
             self.models[ModelType.SENTIMENT_ANALYSIS] = pipeline(
                 "text-classification",
                 model="distilbert-base-uncased-finetuned-sst-2-english",
                 device=0 if self.device == "cuda" else -1
             )
-            logger.info("✅ Loaded: distilbert-base-uncased-finetuned-sst-2-english")
-            
-            logger.info("✅ All models loaded successfully")
+            loaded += 1
+            logger.info("Loaded: distilbert-base-uncased-finetuned-sst-2-english")
         except Exception as e:
-            logger.error(f"Error loading models: {e}")
-            raise
+            logger.warning(f"Sentiment analysis model failed to load: {e}")
+
+        logger.info(f"Models loaded: {loaded}/{total} (fallbacks active for missing models)")
 
     async def predict_at_risk(
         self,
@@ -213,31 +228,81 @@ class HuggingFaceModelManager:
         text: str,
         metrics: Dict[str, float]
     ) -> RiskPrediction:
-        """Synchronous at-risk prediction"""
+        """Synchronous at-risk prediction using metrics-driven scoring."""
         try:
-            # Get model prediction
-            classifier = self.models[ModelType.RISK_DETECTION]
-            prediction = classifier(text, top_k=2)
-            
-            # Extract confidence
-            confidence = prediction[0]["score"]
-            risk_label = prediction[0]["label"]
-            
-            # Calculate composite risk score from metrics
+            # Primary: calculate risk score from academic metrics (reliable)
             risk_factors = []
-            if metrics.get("avg_score", 100) < 50:
-                risk_factors.append("Low average score")
-            if metrics.get("recent_trend", 0) < -5:
-                risk_factors.append("Declining performance")
-            if metrics.get("attendance_rate", 100) < 75:
-                risk_factors.append("Low attendance")
-            if metrics.get("time_spent", 0) < 10:
-                risk_factors.append("Minimal effort/engagement")
-                
-            # Composite risk score
-            base_score = confidence if risk_label == "NEGATIVE" else 0.5
-            penalty = min(len(risk_factors) * 0.15, 0.4)
-            risk_score = min(base_score + penalty, 1.0)
+            metric_score = 0.0
+            weight_sum = 0.0
+
+            avg_score = metrics.get("avg_score", None)
+            if avg_score is not None:
+                weight_sum += 0.35
+                if avg_score < 30:
+                    metric_score += 0.35
+                    risk_factors.append(f"Very low average score ({avg_score:.0f}%)")
+                elif avg_score < 50:
+                    metric_score += 0.25
+                    risk_factors.append(f"Low average score ({avg_score:.0f}%)")
+                elif avg_score < 65:
+                    metric_score += 0.12
+                    risk_factors.append(f"Below-average score ({avg_score:.0f}%)")
+
+            trend = metrics.get("recent_trend", None)
+            if trend is not None:
+                weight_sum += 0.25
+                if trend < -15:
+                    metric_score += 0.25
+                    risk_factors.append(f"Sharp performance decline (trend {trend:+.1f})")
+                elif trend < -5:
+                    metric_score += 0.15
+                    risk_factors.append(f"Declining performance (trend {trend:+.1f})")
+
+            fail_rate = metrics.get("fail_rate", None)
+            if fail_rate is not None:
+                weight_sum += 0.20
+                if fail_rate > 0.6:
+                    metric_score += 0.20
+                    risk_factors.append(f"High failure rate ({fail_rate*100:.0f}%)")
+                elif fail_rate > 0.4:
+                    metric_score += 0.12
+                    risk_factors.append(f"Moderate failure rate ({fail_rate*100:.0f}%)")
+
+            engagement = metrics.get("time_spent", None)
+            if engagement is not None:
+                weight_sum += 0.10
+                if engagement < 10:
+                    metric_score += 0.10
+                    risk_factors.append("Minimal effort/engagement")
+
+            attendance = metrics.get("attendance_rate", None)
+            if attendance is not None:
+                weight_sum += 0.10
+                if attendance < 60:
+                    metric_score += 0.10
+                    risk_factors.append(f"Very low attendance ({attendance:.0f}%)")
+                elif attendance < 75:
+                    metric_score += 0.05
+                    risk_factors.append(f"Low attendance ({attendance:.0f}%)")
+
+            # Normalize score based on available metrics
+            risk_score = metric_score / max(weight_sum, 0.01) if weight_sum > 0 else 0.3
+
+            # Secondary: use NLP model as supplementary signal (small weight)
+            try:
+                classifier = self.models.get(ModelType.RISK_DETECTION)
+                if classifier:
+                    prediction = classifier(text[:512], top_k=2)
+                    confidence = prediction[0]["score"]
+                    risk_label = prediction[0]["label"]
+                    nlp_signal = confidence if risk_label == "NEGATIVE" else (1 - confidence)
+                    # NLP contributes at most 15% to final score
+                    risk_score = risk_score * 0.85 + nlp_signal * 0.15
+            except Exception as nlp_err:
+                logger.debug(f"NLP risk signal skipped: {nlp_err}")
+
+            risk_score = max(0.0, min(risk_score, 1.0))
+            confidence = risk_score
             
             # Determine risk level
             if risk_score >= 0.8:
@@ -317,39 +382,135 @@ class HuggingFaceModelManager:
         context: str,
         summary: str
     ) -> GeneratedFeedback:
-        """Synchronous feedback generation"""
+        """Synchronous feedback generation with education-specific prompting."""
         try:
-            generator = self.models[ModelType.FEEDBACK_GENERATION]
-            
-            # Generate strengths feedback
-            prompt_strengths = f"Identify key strengths: {context}. Performance summary: {summary}. List 3 main strengths:"
-            strengths_response = generator(prompt_strengths, max_length=100)[0]["generated_text"]
-            strengths = [s.strip() for s in strengths_response.split("\n") if s.strip()][:3]
-            
-            # Generate improvement areas
-            prompt_improvements = f"Identify improvement areas: {context}. Performance summary: {summary}. List 3 areas to improve:"
-            improvements_response = generator(prompt_improvements, max_length=100)[0]["generated_text"]
-            improvements = [i.strip() for i in improvements_response.split("\n") if i.strip()][:3]
-            
-            # Generate recommendations
-            prompt_recommendations = f"Provide actionable recommendations: {context}. Performance summary: {summary}. Suggest 3 specific actions:"
-            recommendations_response = generator(prompt_recommendations, max_length=120)[0]["generated_text"]
-            recommendations = [r.strip() for r in recommendations_response.split("\n") if r.strip()][:3]
-            
-            # Generate overall message
-            prompt_overall = f"Write an encouraging summary for a student with this performance: {summary}. Keep it to 2 sentences:"
-            overall_response = generator(prompt_overall, max_length=80)[0]["generated_text"]
-            
+            generator = self.models.get(ModelType.FEEDBACK_GENERATION)
+            if not generator:
+                return self._fallback_feedback(context, summary)
+
+            # Education-focused prompt for strengths
+            prompt_strengths = (
+                "You are an academic advisor. Based on the student performance data below, "
+                "identify exactly 3 academic strengths this student demonstrates. "
+                "Be specific and encouraging.\n\n"
+                f"Student Profile: {context}\n"
+                f"Performance Data: {summary}\n\n"
+                "List 3 strengths (one per line):"
+            )
+            strengths_response = generator(prompt_strengths, max_length=150, num_beams=2)[0]["generated_text"]
+            strengths = [s.strip().lstrip("0123456789.-) ") for s in strengths_response.split("\n") if s.strip()][:3]
+            if not strengths:
+                strengths = [strengths_response.strip()]
+
+            # Education-focused prompt for improvements
+            prompt_improvements = (
+                "You are an academic advisor. Based on the student performance data below, "
+                "identify exactly 3 specific areas where this student needs improvement. "
+                "Be constructive and actionable.\n\n"
+                f"Student Profile: {context}\n"
+                f"Performance Data: {summary}\n\n"
+                "List 3 areas to improve (one per line):"
+            )
+            improvements_response = generator(prompt_improvements, max_length=150, num_beams=2)[0]["generated_text"]
+            improvements = [i.strip().lstrip("0123456789.-) ") for i in improvements_response.split("\n") if i.strip()][:3]
+            if not improvements:
+                improvements = [improvements_response.strip()]
+
+            # Education-focused prompt for recommendations
+            prompt_recommendations = (
+                "You are an academic advisor. Based on the student performance data below, "
+                "provide exactly 3 specific, actionable study recommendations. "
+                "Include concrete steps the student can take.\n\n"
+                f"Student Profile: {context}\n"
+                f"Performance Data: {summary}\n\n"
+                "Suggest 3 study actions (one per line):"
+            )
+            recommendations_response = generator(prompt_recommendations, max_length=180, num_beams=2)[0]["generated_text"]
+            recommendations = [r.strip().lstrip("0123456789.-) ") for r in recommendations_response.split("\n") if r.strip()][:3]
+            if not recommendations:
+                recommendations = [recommendations_response.strip()]
+
+            # Overall encouraging summary
+            prompt_overall = (
+                "You are a supportive academic advisor. Write a brief 2-sentence encouraging "
+                "summary for a student.\n\n"
+                f"Performance: {summary}\n\n"
+                "Encouraging summary:"
+            )
+            overall_response = generator(prompt_overall, max_length=100, num_beams=2)[0]["generated_text"]
+
             return GeneratedFeedback(
                 strengths=strengths,
                 improvements=improvements,
                 recommendations=recommendations,
-                resources=[],  # Will be populated by resource recommender
-                overall_message=overall_response
+                resources=[],
+                overall_message=overall_response.strip()
             )
         except Exception as e:
             logger.error(f"Error in feedback sync generation: {e}")
-            raise
+            return self._fallback_feedback(context, summary)
+
+    def _fallback_feedback(
+        self,
+        context: str,
+        summary: str
+    ) -> GeneratedFeedback:
+        """Rule-based fallback when ML model is unavailable."""
+        # Parse basic metrics from summary text
+        import re
+        avg_match = re.search(r'Average[:\s]+(\d+\.?\d*)%', summary, re.IGNORECASE)
+        avg_score = float(avg_match.group(1)) if avg_match else 50.0
+
+        if avg_score >= 80:
+            strengths = [
+                "Strong overall academic performance across subjects",
+                "Consistent high scores demonstrating solid understanding",
+                "Good time management and exam completion"
+            ]
+            improvements = [
+                "Challenge yourself with advanced-level questions",
+                "Explore topics beyond the syllabus for deeper understanding",
+                "Help peers to reinforce your own knowledge"
+            ]
+            overall = "Excellent work! Your consistent performance shows strong mastery. Keep challenging yourself to reach even greater heights."
+        elif avg_score >= 60:
+            strengths = [
+                "Solid foundational understanding of core concepts",
+                "Consistent effort and engagement with coursework",
+                "Good grasp of fundamental topics"
+            ]
+            improvements = [
+                "Focus on weak chapters with targeted practice",
+                "Review mistakes from previous exams to identify patterns",
+                "Allocate more time to difficult question types"
+            ]
+            overall = "You have a good foundation to build on. With focused practice on weaker areas, you can significantly improve your scores."
+        else:
+            strengths = [
+                "Willingness to attempt exams shows commitment",
+                "Room for significant growth with the right approach",
+                "Every attempt is a learning opportunity"
+            ]
+            improvements = [
+                "Start with basic concepts and build understanding step by step",
+                "Create a structured study schedule covering all chapters",
+                "Seek help from educators on topics you find most challenging"
+            ]
+            overall = "Don't be discouraged by current scores. With a structured study plan and consistent effort, you can make significant progress."
+
+        recommendations = [
+            "Set specific weekly study goals and track your progress",
+            "Practice with past exam questions to build confidence",
+            "Review incorrect answers to understand your mistake patterns"
+        ]
+
+        return GeneratedFeedback(
+            strengths=strengths,
+            improvements=improvements,
+            recommendations=recommendations,
+            resources=[],
+            overall_message=overall
+        )
 
     async def recommend_resources(
         self,
@@ -603,27 +764,26 @@ class HuggingFaceModelManager:
         except Exception as e:
             logger.error(f"Error in sentiment sync analysis: {e}")
             return {"label": "NEUTRAL", "score": 0.5}
-use_finetuned: bool = True) -> HuggingFaceModelManager:
-    """
-    Get or create global model manager
-    
-    Args:
-        use_finetuned: If True, use fine-tuned models when available.
-                      If False, use pre-trained models.
-    """
-    global _model_manager
-    if _model_manager is None:
-        _model_manager = HuggingFaceModelManager(use_finetuned=use_finetuned
 
-async def get_model_manager() -> HuggingFaceModelManager:
-    """Get or create global model manager"""
+
+# =====================================================
+# Global model manager singleton
+# =====================================================
+
+_model_manager: Optional[HuggingFaceModelManager] = None
+
+
+async def get_model_manager(
+    use_finetuned: bool = True
+) -> HuggingFaceModelManager:
+    """Get or create global model manager."""
     global _model_manager
     if _model_manager is None:
-        _model_manager = HuggingFaceModelManager()
+        _model_manager = HuggingFaceModelManager(use_finetuned=use_finetuned)
         await _model_manager.initialize()
     return _model_manager
 
 
-def get_model_manager_sync() -> HuggingFaceModelManager:
-    """Get model manager synchronously (must initialize first)"""
+def get_model_manager_sync() -> Optional[HuggingFaceModelManager]:
+    """Get model manager synchronously (must initialize first)."""
     return _model_manager

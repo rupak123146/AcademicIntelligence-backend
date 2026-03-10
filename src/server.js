@@ -3,11 +3,14 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const compression = require('compression');
+const http = require('http');
 
 const config = require('./config');
 const routes = require('./routes');
 const { connectDatabase, closeDatabase } = require('./config/database');
 const logger = require('./utils/logger');
+const { getScheduler } = require('./services/autoSubmitScheduler'); // Issue #4: Auto-submit scheduler
+const { initializeRealtimeGateway } = require('./services/realtimeGateway');
 const {
   errorHandler,
   notFoundHandler,
@@ -83,8 +86,16 @@ const startServer = async () => {
 
     logger.info('Database connections initialized');
 
-    // Start server
-    const server = app.listen(config.port, () => {
+    // Issue #4: Start auto-submit scheduler for expired exams
+    const autoSubmitScheduler = getScheduler();
+    autoSubmitScheduler.start();
+    logger.info('Auto-submit scheduler started');
+
+    // Start server with HTTP wrapper for WebSocket support
+    const httpServer = http.createServer(app);
+    initializeRealtimeGateway(httpServer, config.cors);
+
+    const server = httpServer.listen(config.port, () => {
       logger.info(`Server running in ${config.env} mode on port ${config.port}`);
       logger.info(`API available at http://localhost:${config.port}/api/${config.apiVersion}`);
       if (config.env === 'development') {
@@ -95,6 +106,9 @@ const startServer = async () => {
     // Graceful shutdown
     const gracefulShutdown = async (signal) => {
       logger.info(`${signal} received. Starting graceful shutdown...`);
+      
+      // Stop auto-submit scheduler
+      autoSubmitScheduler.stop();
       
       server.close(async () => {
         logger.info('HTTP server closed');

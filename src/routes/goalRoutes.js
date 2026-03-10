@@ -6,7 +6,7 @@
 const express = require('express');
 const router = express.Router();
 const goalController = require('../controllers/goalController');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isStudent, isEducatorOrAdmin } = require('../middleware/auth');
 
 // All routes require authentication
 router.use(authenticate);
@@ -16,7 +16,7 @@ router.use(authenticate);
  * @desc    Create a new student goal
  * @access  Private (Student/Educator)
  */
-router.post('/create', goalController.createGoal);
+router.post('/create', isStudent, goalController.createGoal);
 
 /**
  * @route   GET /api/v1/goals/student/:studentId
@@ -30,7 +30,14 @@ router.get('/student/:studentId', goalController.getStudentGoals);
  * @desc    Update goal progress
  * @access  Private (Student/Educator)
  */
-router.post('/:goalId/update-progress', goalController.updateGoalProgress);
+router.post('/:goalId/update-progress', isStudent, goalController.updateGoalProgress);
+
+/**
+ * @route   GET /api/v1/goals/course/:courseId/summary
+ * @desc    Get course-wide goals summary
+ * @access  Private (Educator)
+ */
+router.get('/course/:courseId/summary', isEducatorOrAdmin, goalController.getCourseGoalsSummary);
 
 /**
  * @route   GET /api/v1/goals/:goalId
@@ -38,12 +45,5 @@ router.post('/:goalId/update-progress', goalController.updateGoalProgress);
  * @access  Private (Student/Educator)
  */
 router.get('/:goalId', goalController.getGoalDetails);
-
-/**
- * @route   GET /api/v1/goals/course/:courseId/summary
- * @desc    Get course-wide goals summary
- * @access  Private (Educator)
- */
-router.get('/course/:courseId/summary', goalController.getCourseGoalsSummary);
 
 module.exports = router;

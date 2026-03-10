@@ -6,7 +6,7 @@
 const axios = require('axios');
 const logger = require('../utils/logger');
 
-const PYTHON_ANALYTICS_URL = process.env.PYTHON_ANALYTICS_URL || 'http://localhost:8000';
+const PYTHON_ANALYTICS_URL = process.env.PYTHON_ANALYTICS_URL || 'http://localhost:8001';
 
 class PythonAnalyticsClient {
   constructor() {
@@ -67,9 +67,9 @@ class PythonAnalyticsClient {
   async getChapterAnalysis(studentId, courseId, examId = null) {
     try {
       const response = await this.client.post('/chapter', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
-        exam_id: examId ? parseInt(examId) : null,
+        student_id: String(studentId),
+        course_id: String(courseId),
+        exam_id: examId ? String(examId) : null,
       });
       return response.data.data;
     } catch (error) {
@@ -84,9 +84,9 @@ class PythonAnalyticsClient {
   async getConceptAnalysis(studentId, courseId, chapterId = null) {
     try {
       const response = await this.client.post('/concept', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
-        chapter_id: chapterId ? parseInt(chapterId) : null,
+        student_id: String(studentId),
+        course_id: String(courseId),
+        chapter_id: chapterId ? String(chapterId) : null,
       });
       return response.data.data;
     } catch (error) {
@@ -101,9 +101,9 @@ class PythonAnalyticsClient {
   async getDifficultyAnalysis(studentId, courseId, examId = null) {
     try {
       const response = await this.client.post('/difficulty', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
-        exam_id: examId ? parseInt(examId) : null,
+        student_id: String(studentId),
+        course_id: String(courseId),
+        exam_id: examId ? String(examId) : null,
       });
       return response.data.data;
     } catch (error) {
@@ -118,8 +118,8 @@ class PythonAnalyticsClient {
   async getLearningGaps(studentId, courseId) {
     try {
       const response = await this.client.post('/gaps', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
+        student_id: String(studentId),
+        course_id: String(courseId),
       });
       return response.data.data;
     } catch (error) {
@@ -134,8 +134,8 @@ class PythonAnalyticsClient {
   async getPerformanceTrend(studentId, courseId, windowSize = 5) {
     try {
       const response = await this.client.post('/trend', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
+        student_id: String(studentId),
+        course_id: String(courseId),
       }, {
         params: { window_size: windowSize },
       });
@@ -152,9 +152,9 @@ class PythonAnalyticsClient {
   async getFeedback(studentId, courseId, examId = null) {
     try {
       const response = await this.client.post('/feedback', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
-        exam_id: examId ? parseInt(examId) : null,
+        student_id: String(studentId),
+        course_id: String(courseId),
+        exam_id: examId ? String(examId) : null,
       });
       return response.data.data;
     } catch (error) {
@@ -169,9 +169,9 @@ class PythonAnalyticsClient {
   async getFullAnalysis(studentId, courseId, examId = null, options = {}) {
     try {
       const response = await this.client.post('/full', {
-        student_id: parseInt(studentId),
-        course_id: parseInt(courseId),
-        exam_id: examId ? parseInt(examId) : null,
+        student_id: String(studentId),
+        course_id: String(courseId),
+        exam_id: examId ? String(examId) : null,
         include_chapters: options.includeChapters !== false,
         include_concepts: options.includeConcepts !== false,
         include_difficulty: options.includeDifficulty !== false,
@@ -192,9 +192,9 @@ class PythonAnalyticsClient {
   async getClassAnalytics(courseId, educatorId, examId = null) {
     try {
       const response = await this.client.post('/class', {
-        course_id: parseInt(courseId),
-        educator_id: parseInt(educatorId),
-        exam_id: examId ? parseInt(examId) : null,
+        course_id: String(courseId),
+        educator_id: String(educatorId),
+        exam_id: examId ? String(examId) : null,
       });
       return response.data.data;
     } catch (error) {
@@ -213,8 +213,8 @@ class PythonAnalyticsClient {
   async generateRandomizedExam(examId, studentId, seed = null) {
     try {
       const response = await this.client.post('/randomization/generate', {
-        exam_id: parseInt(examId),
-        student_id: parseInt(studentId),
+        exam_id: String(examId),
+        student_id: String(studentId),
         seed: seed,
       });
       return response.data.data;
@@ -231,7 +231,7 @@ class PythonAnalyticsClient {
     try {
       const response = await this.client.post('/randomization/verify', {
         version_id: versionId,
-        question_id: parseInt(questionId),
+        question_id: String(questionId),
         selected_option: selectedOption,
       });
       return response.data.data;

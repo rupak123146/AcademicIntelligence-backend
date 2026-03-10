@@ -15,7 +15,7 @@ from src.training.data_collector import TrainingDataCollector
 from src.training.risk_trainer import RiskDetectionTrainer
 from src.training.feedback_trainer import FeedbackGenerationTrainer
 from src.training.model_evaluator import ModelEvaluator
-from src.config.database import DatabaseConfig
+from src.config.database import db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -147,9 +147,8 @@ async def main():
     logger.info("Starting comprehensive model training...")
     
     try:
-        # Initialize database connection
-        db_config = DatabaseConfig()
-        await db_config.connect()
+        # Initialize database connections
+        await db.init_all()
         
         # Train risk detection model
         risk_model = await train_risk_detection_model()
@@ -174,7 +173,7 @@ async def main():
         logger.error(f"Training pipeline failed: {e}", exc_info=True)
         raise
     finally:
-        await db_config.disconnect()
+        await db.close_all()
 
 
 if __name__ == "__main__":

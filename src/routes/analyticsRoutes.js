@@ -87,6 +87,16 @@ router.get('/my-learning-gaps',
 );
 
 /**
+ * @route GET /api/v1/analytics/my-feedback
+ * @desc Get current user's AI-powered personalized feedback
+ * @access Private
+ */
+router.get('/my-feedback', 
+  authenticate, 
+  analyticsController.getStudentFeedback
+);
+
+/**
  * Student Analytics Routes
  */
 

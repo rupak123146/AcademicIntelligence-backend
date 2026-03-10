@@ -2,6 +2,9 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/database');
 const { authenticate } = require('../middleware/auth');
+const { paginate, buildPaginationMeta } = require('../utils/helpers');
+const { createNotification } = require('../services/notificationService');
+const logger = require('../utils/logger');
 
 /**
  * @route GET /api/v1/tasks/my-tasks
@@ -10,6 +13,7 @@ const { authenticate } = require('../middleware/auth');
  */
 router.get('/my-tasks', authenticate, async (req, res) => {
   try {
+      const pagination = paginate(req.query.page, req.query.limit);
     const student = await prisma.user.findUnique({
       where: { id: req.user.id },
       select: { role: true },
@@ -20,6 +24,8 @@ router.get('/my-tasks', authenticate, async (req, res) => {
         message: 'Only students can view their tasks',
       });
     }
+
+  const total = await prisma.taskAssignment.count({ where: { studentId: req.user.id } });
 
     const taskAssignments = await prisma.taskAssignment.findMany({
       where: { studentId: req.user.id },
@@ -37,12 +43,15 @@ router.get('/my-tasks', authenticate, async (req, res) => {
         },
       },
       orderBy: { createdAt: 'desc' },
+      skip: pagination.offset,
+      take: pagination.limit,
     });
 
     res.status(200).json({
       success: true,
       count: taskAssignments.length,
       data: taskAssignments,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     });
   } catch (error) {
     res.status(500).json({
@@ -234,6 +243,32 @@ router.put('/assignments/:assignmentId/submit', authenticate, async (req, res) =
         feedback: submissionText || undefined,
       },
     });
+
+    // Notify the task creator (educator)
+    const task = await prisma.task.findUnique({
+      where: { id: assignment.taskId },
+      select: { createdById: true, title: true, courseId: true },
+    });
+    if (task?.createdById) {
+      const student = await prisma.user.findUnique({
+        where: { id: req.user.id },
+        select: { firstName: true, lastName: true, studentId: true },
+      });
+      const studentName = student ? `${student.firstName} ${student.lastName}` : 'A student';
+      const studentLabel = student?.studentId ? ` (${student.studentId})` : '';
+      await createNotification({
+        userId: task.createdById,
+        courseId: task.courseId,
+        notificationType: 'task_submitted',
+        title: 'Task Submission Received',
+        message: `${studentName}${studentLabel} submitted "${task.title}".`,
+        priority: 'medium',
+        actionUrl: `/educator/students`,
+        metadata: { taskId: assignment.taskId, assignmentId: assignment.id, studentId: req.user.id },
+      }).catch((error) => {
+        logger.warn('Failed to create task submission notification', { assignmentId: assignment.id, error: error.message });
+      });
+    }
 
     res.status(200).json({
       success: true,

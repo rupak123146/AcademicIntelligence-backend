@@ -37,21 +37,21 @@ router = APIRouter(prefix="/analytics", tags=["Analytics"])
 # =====================================================
 
 class AnalyzeStudentRequest(BaseModel):
-    student_id: int
-    course_id: int
-    exam_id: Optional[int] = None
+    student_id: str
+    course_id: str
+    exam_id: Optional[str] = None
 
 
 class AnalyzeClassRequest(BaseModel):
-    course_id: int
-    educator_id: int
-    exam_id: Optional[int] = None
+    course_id: str
+    educator_id: str
+    exam_id: Optional[str] = None
 
 
 class FullAnalysisRequest(BaseModel):
-    student_id: int
-    course_id: int
-    exam_id: Optional[int] = None
+    student_id: str
+    course_id: str
+    exam_id: Optional[str] = None
     include_chapters: bool = True
     include_concepts: bool = True
     include_difficulty: bool = True

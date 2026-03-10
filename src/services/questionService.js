@@ -9,6 +9,62 @@ const logger = require('../utils/logger');
 
 class QuestionService {
   /**
+   * Validate question options by type
+   */
+  validateQuestionOptions(questionType, options, correctAnswer) {
+    const mcqTypes = ['mcq', 'multiple', 'multiple_choice'];
+    const tfTypes = ['true_false', 'boolean'];
+    const subjectiveTypes = ['short_answer', 'essay', 'descriptive'];
+
+    if (mcqTypes.includes(questionType)) {
+      if (!Array.isArray(options) || options.length < 2) {
+        throw ApiError.badRequest('MCQ questions must have at least 2 options');
+      }
+      if (options.length > 10) {
+        throw ApiError.badRequest('MCQ questions cannot have more than 10 options');
+      }
+      const correctCount = options.filter((opt) => !!opt.isCorrect).length;
+      if (correctCount < 1) {
+        throw ApiError.badRequest('At least one option must be marked as correct');
+      }
+      if (correctCount > 5) {
+        throw ApiError.badRequest('MCQ cannot have more than 5 correct answers');
+      }
+    }
+
+    if (tfTypes.includes(questionType)) {
+      if (!Array.isArray(options) || options.length !== 2) {
+        throw ApiError.badRequest('True/False questions must have exactly 2 options');
+      }
+      const optionTexts = options
+        .map((o) => (o.text || o.optionText || '').trim().toLowerCase())
+        .filter(Boolean);
+      const validPair =
+        (optionTexts.includes('true') && optionTexts.includes('false')) ||
+        (optionTexts.includes('yes') && optionTexts.includes('no'));
+      if (!validPair) {
+        throw ApiError.badRequest('True/False options must be "True/False" or "Yes/No"');
+      }
+      const correctCount = options.filter((opt) => !!opt.isCorrect).length;
+      if (correctCount !== 1) {
+        throw ApiError.badRequest('True/False questions must have exactly one correct option');
+      }
+    }
+
+    if (subjectiveTypes.includes(questionType)) {
+      if (Array.isArray(options) && options.length > 0) {
+        logger.warn('Subjective question received options; they will be ignored', { questionType });
+      }
+      if (!correctAnswer || String(correctAnswer).trim().length < 5) {
+        throw ApiError.badRequest('Subjective questions must have a sample answer of at least 5 characters');
+      }
+      if (String(correctAnswer).length > 2000) {
+        throw ApiError.badRequest('Sample correct answer cannot exceed 2000 characters');
+      }
+    }
+  }
+
+  /**
    * Create a new question
    */
   async createQuestion(data, creatorId) {
@@ -54,16 +110,7 @@ class QuestionService {
       throw ApiError.badRequest('Selected concept does not belong to selected chapter');
     }
 
-    // Validate options for MCQ
-    if (['mcq', 'multiple', 'multiple_choice'].includes(questionType)) {
-      if (!options || options.length < 2) {
-        throw ApiError.badRequest('MCQ questions must have at least 2 options');
-      }
-      const hasCorrectOption = options.some(opt => opt.isCorrect);
-      if (!hasCorrectOption) {
-        throw ApiError.badRequest('At least one option must be marked as correct');
-      }
-    }
+    this.validateQuestionOptions(questionType, options, correctAnswer);
 
     const question = await prisma.question.create({
       data: {
@@ -72,7 +119,7 @@ class QuestionService {
         subjectId: subjectId || undefined,
         chapterId: chapterId || undefined,
         conceptId: conceptId || undefined,
-        correctAnswer: ['mcq', 'multiple', 'multiple_choice'].includes(questionType)
+        correctAnswer: ['mcq', 'multiple', 'multiple_choice', 'true_false'].includes(questionType)
           ? null
           : correctAnswer,
         explanation,
@@ -231,6 +278,11 @@ class QuestionService {
     if (concept.chapterId !== finalChapterId) {
       throw ApiError.badRequest('Selected concept does not belong to selected chapter');
     }
+
+    const finalQuestionType = data.questionType !== undefined ? data.questionType : question.questionType;
+    const finalOptions = data.options !== undefined ? data.options : question.options;
+    const finalCorrectAnswer = data.correctAnswer !== undefined ? data.correctAnswer : question.correctAnswer;
+    this.validateQuestionOptions(finalQuestionType, finalOptions, finalCorrectAnswer);
 
     // Update fields
     const allowedFields = [

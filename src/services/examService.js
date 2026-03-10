@@ -4,9 +4,13 @@
  */
 
 const { prisma } = require('../config/database');
-const { setCache, getCache, deleteCache, CacheKeys } = require('../config/redis');
+const { setCache, getCache, CacheKeys } = require('../config/redis');
 const { ApiError, paginate, buildPaginationMeta } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const { invalidateExamCache } = require('./cacheInvalidationService');
+const { createNotification, notifyInstitution } = require('./notificationService');
+const { emitToExamRoom } = require('./realtimeGateway');
+const { getFlagValue } = require('./featureFlagService');
 
 class ExamService {
   buildExamIncludes(includeQuestions = false) {
@@ -28,6 +32,93 @@ class ExamService {
         : false,
       _count: { select: { questions: true } },
     };
+  }
+
+  async syncExpiredExamStatuses(institutionId) {
+    const where = {
+      status: { in: ['published', 'active'] },
+      endTime: { lte: new Date() },
+      ...(institutionId ? { institutionId } : {}),
+    };
+
+    const resultByEndTime = await prisma.exam.updateMany({
+      where,
+      data: { status: 'completed' },
+    });
+
+    const candidatesWithoutEndTime = await prisma.exam.findMany({
+      where: {
+        status: { in: ['published', 'active'] },
+        endTime: null,
+        ...(institutionId ? { institutionId } : {}),
+      },
+      select: {
+        id: true,
+        startTime: true,
+        createdAt: true,
+        durationMinutes: true,
+      },
+    });
+
+    const now = new Date();
+    const expiredByDurationIds = candidatesWithoutEndTime
+      .filter((exam) => {
+        const start = exam.startTime ? new Date(exam.startTime) : new Date(exam.createdAt);
+        const computedEnd = new Date(start);
+        computedEnd.setMinutes(computedEnd.getMinutes() + (exam.durationMinutes || 0));
+        return computedEnd <= now;
+      })
+      .map((exam) => exam.id);
+
+    const candidatesWithWindow = await prisma.exam.findMany({
+      where: {
+        status: { in: ['published', 'active'] },
+        startTime: { not: null },
+        endTime: { not: null },
+        ...(institutionId ? { institutionId } : {}),
+      },
+      select: {
+        id: true,
+        startTime: true,
+        endTime: true,
+        durationMinutes: true,
+      },
+    });
+
+    const expiredByEffectiveEndIds = candidatesWithWindow
+      .filter((exam) => {
+        const start = new Date(exam.startTime);
+        const byDuration = new Date(start);
+        byDuration.setMinutes(byDuration.getMinutes() + (exam.durationMinutes || 0));
+        const byWindow = new Date(exam.endTime);
+        const effectiveEnd = byDuration <= byWindow ? byDuration : byWindow;
+        return effectiveEnd <= now;
+      })
+      .map((exam) => exam.id);
+
+    const idsToClose = Array.from(new Set([...expiredByDurationIds, ...expiredByEffectiveEndIds]));
+
+    let closedByDurationCount = 0;
+    if (idsToClose.length > 0) {
+      const resultByDuration = await prisma.exam.updateMany({
+        where: { id: { in: idsToClose } },
+        data: { status: 'completed' },
+      });
+      closedByDurationCount = resultByDuration.count;
+    }
+
+    const closedCount = resultByEndTime.count + closedByDurationCount;
+
+    if (closedCount > 0) {
+      logger.info('Auto-closed expired exams', {
+        institutionId: institutionId || null,
+        closedCount,
+        closedByEndTime: resultByEndTime.count,
+        closedByDuration: closedByDurationCount,
+      });
+    }
+
+    return closedCount;
   }
 
   /**
@@ -98,6 +189,10 @@ class ExamService {
       include: this.buildExamIncludes(false),
     });
 
+    await invalidateExamCache(exam.id, user.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on exam create', { examId: exam.id, error: error.message });
+    });
+
     logger.info('Exam created:', { examId: exam.id, courseId, creatorId });
 
     return this.formatExamResponse(exam);
@@ -107,6 +202,10 @@ class ExamService {
    * Get exam by ID
    */
   async getExamById(examId, userId, userRole) {
+    await this.syncExpiredExamStatuses().catch((error) => {
+      logger.warn('Failed to sync expired exam statuses before getExamById', { examId, error: error.message });
+    });
+
     const cached = await getCache(CacheKeys.examDetails(examId));
     if (cached && userRole !== 'student') {
       return cached;
@@ -177,15 +276,124 @@ class ExamService {
   }
 
   /**
+   * Get exam preview (metadata only, no questions)
+   */
+  async getExamPreview(examId, userId, userRole) {
+    await this.syncExpiredExamStatuses().catch((error) => {
+      logger.warn('Failed to sync expired exam statuses before getExamPreview', { examId, error: error.message });
+    });
+
+    if (!getFlagValue('examPreview')) {
+      throw ApiError.badRequest('Exam preview is currently disabled');
+    }
+
+    const exam = await prisma.exam.findUnique({
+      where: { id: examId },
+      include: {
+        course: { select: { id: true, name: true, code: true } },
+        subject: { select: { id: true, name: true, code: true } },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        examSections: { select: { sectionId: true } },
+        examDepartments: { select: { departmentId: true } },
+        examStudents: { select: { studentId: true } },
+        _count: { select: { questions: true, attempts: true } },
+      },
+    });
+
+    if (!exam) {
+      throw ApiError.notFound('Exam not found');
+    }
+
+    if (userRole === 'student') {
+      if (!['published', 'active', 'completed'].includes(exam.status)) {
+        throw ApiError.notFound(`This exam is currently unavailable (${exam.status})`);
+      }
+
+      const student = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { sectionId: true, departmentId: true, institutionId: true },
+      });
+      if (!student) {
+        throw ApiError.notFound('Student not found');
+      }
+
+      if (exam.institutionId && student.institutionId && exam.institutionId !== student.institutionId) {
+        throw ApiError.notFound('Exam not found');
+      }
+
+      const assignedSectionIds = exam.examSections.map((r) => r.sectionId);
+      const assignedDepartmentIds = exam.examDepartments.map((r) => r.departmentId);
+      const assignedStudentIds = exam.examStudents.map((r) => r.studentId);
+
+      const isAssigned =
+        exam.assignmentMode === 'all' ||
+        (student.sectionId && assignedSectionIds.includes(student.sectionId)) ||
+        (student.departmentId && assignedDepartmentIds.includes(student.departmentId)) ||
+        assignedStudentIds.includes(userId);
+
+      if (!isAssigned) {
+        throw ApiError.forbidden('This exam is not assigned to you');
+      }
+    }
+
+    return {
+      id: exam.id,
+      title: exam.title,
+      description: exam.description,
+      instructions: exam.instructions,
+      examType: exam.examType,
+      status: exam.status,
+      durationMinutes: exam.durationMinutes,
+      totalMarks: exam.totalMarks,
+      passingMarks: exam.passingMarks,
+      passingPercentage: exam.passingPercentage,
+      negativeMarking: exam.negativeMarking,
+      negativeMarkValue: exam.negativeMarkValue,
+      shuffleQuestions: exam.shuffleQuestions,
+      shuffleOptions: exam.shuffleOptions,
+      showResult: exam.showResult,
+      showAnswers: exam.showAnswers,
+      allowReview: exam.allowReview,
+      maxAttempts: exam.maxAttempts,
+      startTime: exam.startTime,
+      endTime: exam.endTime,
+      courseName: exam.course?.name,
+      courseCode: exam.course?.code,
+      subjectName: exam.subject?.name,
+      creatorName: exam.createdBy ? `${exam.createdBy.firstName} ${exam.createdBy.lastName}` : null,
+      questionCount: exam._count.questions,
+      totalAttempts: exam._count.attempts,
+      createdAt: exam.createdAt,
+    };
+  }
+
+  /**
    * Get exams list with filters
    */
   async getExams(filters, userId, userRole) {
-    const { page, limit, status, examType, search, startDate, endDate, subjectId } = filters;
+    const {
+      page,
+      limit,
+      status,
+      examType,
+      search,
+      startDate,
+      endDate,
+      subjectId,
+      courseId,
+      assignmentMode,
+      minDuration,
+      maxDuration,
+    } = filters;
     const pagination = paginate(page, limit);
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
       select: { institutionId: true, sectionId: true, departmentId: true },
+    });
+
+    await this.syncExpiredExamStatuses(user?.institutionId).catch((error) => {
+      logger.warn('Failed to sync expired exam statuses before getExams', { userId, error: error.message });
     });
 
     const query = { institutionId: user.institutionId };
@@ -205,13 +413,34 @@ class ExamService {
     if (status) query.status = status;
     if (examType) query.examType = examType;
     if (subjectId) query.subjectId = subjectId;
+    if (courseId) query.courseId = courseId;
+    if (assignmentMode) query.assignmentMode = assignmentMode;
+    if (minDuration || maxDuration) {
+      query.durationMinutes = {
+        ...(minDuration ? { gte: parseInt(minDuration, 10) } : {}),
+        ...(maxDuration ? { lte: parseInt(maxDuration, 10) } : {}),
+      };
+    }
+
     if (search) {
       query.AND = query.AND || [];
+      const searchableFields = [
+        { title: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ];
+
+      if (getFlagValue('advancedSearch')) {
+        searchableFields.push(
+          { instructions: { contains: search, mode: 'insensitive' } },
+          { subject: { name: { contains: search, mode: 'insensitive' } } },
+          { subject: { code: { contains: search, mode: 'insensitive' } } },
+          { course: { name: { contains: search, mode: 'insensitive' } } },
+          { course: { code: { contains: search, mode: 'insensitive' } } }
+        );
+      }
+
       query.AND.push({
-        OR: [
-          { title: { contains: search, mode: 'insensitive' } },
-          { description: { contains: search, mode: 'insensitive' } },
-        ],
+        OR: searchableFields,
       });
     }
     if (startDate) {
@@ -260,39 +489,9 @@ class ExamService {
       };
     }));
 
-    const dedupeKey = (exam) => {
-      const start = exam.startTime ? new Date(exam.startTime).toISOString() : '';
-      const end = exam.endTime ? new Date(exam.endTime).toISOString() : '';
-      return [
-        exam.title,
-        exam.courseId || '',
-        exam.subjectId || '',
-        exam.createdBy || '',
-        exam.examType || '',
-        start,
-        end,
-      ].join('|');
-    };
-
-    const seen = new Map();
-    const uniqueExams = [];
-    examResponses.forEach((exam) => {
-      const key = dedupeKey(exam);
-      if (seen.has(key)) {
-        logger.warn('Duplicate exam response filtered', {
-          examId: exam.id,
-          duplicateOf: seen.get(key),
-          key,
-        });
-        return;
-      }
-      seen.set(key, exam.id);
-      uniqueExams.push(exam);
-    });
-
     return {
-      exams: uniqueExams,
-      meta: buildPaginationMeta(pagination.page, pagination.limit, uniqueExams.length),
+      exams: examResponses,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     };
   }
 
@@ -309,6 +508,10 @@ class ExamService {
     if (!student) {
       throw ApiError.notFound('Student not found');
     }
+
+    await this.syncExpiredExamStatuses(student.institutionId).catch((error) => {
+      logger.warn('Failed to sync expired exam statuses before getAvailableExams', { studentId, error: error.message });
+    });
 
     logger.info('Student requesting available exams:', {
       studentId,
@@ -377,7 +580,21 @@ class ExamService {
   }
 
   /**
-   * Update exam
+   * Issue #19: Validate exam state transitions (state machine)
+   */
+  isValidStatusTransition(fromStatus, toStatus) {
+    const validTransitions = {
+      draft: ['published', 'archived', 'deleted'],
+      published: ['active', 'archived', 'draft'], // Can revert from published
+      active: ['completed', 'archived'],
+      completed: ['archived'],
+      archived: [], // Terminal state
+    };
+    return validTransitions[fromStatus]?.includes(toStatus) ?? false;
+  }
+
+  /**
+   * Update exam - with state machine validation
    */
   async updateExam(examId, updateData, userId, userRole) {
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
@@ -395,19 +612,77 @@ class ExamService {
       }
     }
 
+    // Issue #19: Prevent updates to active/completed exams
     if (['active', 'completed'].includes(exam.status)) {
       throw ApiError.badRequest('Cannot update an active or completed exam');
     }
 
-    const updated = await prisma.exam.update({
-      where: { id: examId },
-      data: updateData,
-      include: this.buildExamIncludes(false),
+    // Issue #19: Validate status transition if changing status
+    if (updateData.status && updateData.status !== exam.status) {
+      if (!this.isValidStatusTransition(exam.status, updateData.status)) {
+        throw ApiError.badRequest(
+          `Cannot transition from ${exam.status} to ${updateData.status}`
+        );
+      }
+    }
+
+    // Use optimistic locking only when the current Prisma client exposes `version`.
+    const supportsOptimisticLock = typeof exam.version === 'number';
+    let updated;
+
+    if (supportsOptimisticLock) {
+      const optimisticResult = await prisma.exam.updateMany({
+        where: { id: examId, version: exam.version },
+        data: { ...updateData, version: { increment: 1 } },
+      });
+
+      if (optimisticResult.count === 0) {
+        throw ApiError.conflict('Exam was modified by another user. Please refresh and try again.');
+      }
+
+      updated = await prisma.exam.findUnique({
+        where: { id: examId },
+        include: this.buildExamIncludes(false),
+      });
+    } else {
+      updated = await prisma.exam.update({
+        where: { id: examId },
+        data: updateData,
+        include: this.buildExamIncludes(false),
+      });
+    }
+
+    // Log audit trail when the Prisma client exposes the delegate.
+    if (updateData.status || Object.keys(updateData).length > 0) {
+      const auditDelegate = prisma?.examAuditLog;
+      if (auditDelegate && typeof auditDelegate.create === 'function') {
+        await auditDelegate.create({
+          data: {
+            examId,
+            userId,
+            action: updateData.status ? 'status_changed' : 'updated',
+            changes: updateData,
+            timestamp: new Date(),
+          },
+        }).catch(err => logger.warn('Failed to log audit', { err }));
+      } else {
+        logger.warn('Exam audit log delegate unavailable. Skipping audit write.', { examId, userId });
+      }
+    }
+
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on exam update', { examId, error: error.message });
     });
 
-    await deleteCache(CacheKeys.examDetails(examId));
+    if (getFlagValue('websocketNotifications')) {
+      notifyInstitution(exam.institutionId, 'exam:updated', {
+        examId,
+        status: updated.status,
+        title: updated.title,
+      });
+    }
 
-    logger.info('Exam updated:', { examId, userId });
+    logger.info('Exam updated:', { examId, userId, changes: Object.keys(updateData) });
     return this.formatExamResponse(updated);
   }
 
@@ -443,7 +718,9 @@ class ExamService {
       prisma.exam.delete({ where: { id: examId } }),
     ]);
 
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on exam delete', { examId, error: error.message });
+    });
 
     logger.info('Exam deleted:', { examId, userId });
     return true;
@@ -488,7 +765,9 @@ class ExamService {
     const totalMarks = allQuestions.reduce((sum, rel) => sum + (rel.question.marks || 1), 0);
 
     await prisma.exam.update({ where: { id: examId }, data: { totalMarks } });
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on add questions', { examId, error: error.message });
+    });
 
     logger.info('Questions added to exam:', { examId, questionCount: questionIds.length });
     const updated = await prisma.exam.findUnique({
@@ -528,7 +807,9 @@ class ExamService {
     const totalMarks = allQuestions.reduce((sum, rel) => sum + (rel.question.marks || 1), 0);
 
     await prisma.exam.update({ where: { id: examId }, data: { totalMarks } });
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on remove questions', { examId, error: error.message });
+    });
 
     logger.info('Questions removed from exam:', { examId, questionCount: questionIds.length });
     const updated = await prisma.exam.findUnique({
@@ -539,12 +820,13 @@ class ExamService {
   }
 
   /**
-   * Publish exam
+   * Publish exam - with comprehensive validation
    */
   async publishExam(examId, userId, userRole) {
     const exam = await prisma.exam.findUnique({
       where: { id: examId },
       include: { 
+        questions: { include: { question: { include: { options: true } } } },
         _count: { 
           select: { 
             questions: true,
@@ -569,10 +851,32 @@ class ExamService {
       }
     }
 
+    // Issue #9: Validate minimum questions
     if (exam._count.questions === 0) {
-      throw ApiError.badRequest('Cannot publish exam without questions');
+      throw ApiError.badRequest('Cannot publish exam without questions. Add at least 1 question.');
     }
 
+    // Issue #9: Validate all questions have correct answers
+    const invalidQuestions = exam.questions.filter(rel => {
+      const q = rel.question;
+      // For short_answer, essay, numerical - correctAnswer in JSON field
+      if (['short_answer', 'essay', 'numerical'].includes(q.questionType)) {
+        return !q.correctAnswer;
+      }
+      // For true_false and MCQ types - check isCorrect flag on options
+      if (['true_false', 'mcq', 'multiple', 'multiple_choice'].includes(q.questionType)) {
+        return !q.options || !q.options.some(opt => opt.isCorrect);
+      }
+      return false;
+    });
+    
+    if (invalidQuestions.length > 0) {
+      throw ApiError.badRequest(
+        `${invalidQuestions.length} question(s) don't have correct answers defined. Please review them before publishing.`
+      );
+    }
+
+    // Issue #2: Time validation - startTime must be before endTime
     const now = new Date();
     if (exam.endTime && new Date(exam.endTime) <= now) {
       throw ApiError.badRequest('Cannot publish exam because end time is already in the past');
@@ -582,7 +886,12 @@ class ExamService {
       throw ApiError.badRequest('Cannot publish exam because start time must be before end time');
     }
 
-    // Validate that exam is assigned to someone
+    // If startTime is set, ensure it's in the future (Issue #2)
+    if (exam.startTime && new Date(exam.startTime) <= now) {
+      throw ApiError.badRequest('Exam start time must be in the future');
+    }
+
+    // Validate exam is assigned to someone
     const hasAssignments = 
       exam.assignmentMode === 'all' ||
       exam._count.examSections > 0 ||
@@ -595,14 +904,66 @@ class ExamService {
       );
     }
 
-    const updated = await prisma.exam.update({
-      where: { id: examId },
-      data: { status: 'published' },
-      include: this.buildExamIncludes(false),
-    });
-    await deleteCache(CacheKeys.examDetails(examId));
+    const supportsOptimisticLock = typeof exam.version === 'number';
+    let updated;
 
-    logger.info('Exam published:', { examId, userId });
+    if (supportsOptimisticLock) {
+      const optimisticResult = await prisma.exam.updateMany({
+        where: { id: examId, version: exam.version },
+        data: { status: 'published', version: { increment: 1 } },
+      });
+
+      if (optimisticResult.count === 0) {
+        throw ApiError.conflict('Exam was modified by another user. Please refresh and try again.');
+      }
+
+      updated = await prisma.exam.findUnique({
+        where: { id: examId },
+        include: this.buildExamIncludes(false),
+      });
+    } else {
+      updated = await prisma.exam.update({
+        where: { id: examId },
+        data: { status: 'published' },
+        include: this.buildExamIncludes(false),
+      });
+    }
+
+    // Issue #21: Log to audit trail when available.
+    const auditDelegate = prisma?.examAuditLog;
+    if (auditDelegate && typeof auditDelegate.create === 'function') {
+      await auditDelegate.create({
+        data: {
+          examId,
+          userId,
+          action: 'published',
+          changes: {},
+          timestamp: new Date(),
+        },
+      }).catch(err => logger.warn('Failed to log audit', { err }));
+    } else {
+      logger.warn('Exam audit log delegate unavailable. Skipping publish audit write.', { examId, userId });
+    }
+
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on publish', { examId, error: error.message });
+    });
+
+    if (getFlagValue('websocketNotifications')) {
+      notifyInstitution(exam.institutionId, 'exam:published', {
+        examId,
+        title: updated.title,
+        startTime: updated.startTime,
+        endTime: updated.endTime,
+      });
+
+      emitToExamRoom(examId, 'exam:status_changed', {
+        examId,
+        status: 'published',
+      });
+    }
+
+    logger.info('Exam published:', { examId, userId, version: exam.version ?? null });
     return this.formatExamResponse(updated);
   }
 
@@ -634,7 +995,9 @@ class ExamService {
       data: { status: 'active' },
       include: this.buildExamIncludes(false),
     });
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on activate', { examId, error: error.message });
+    });
 
     logger.info('Exam activated:', { examId, userId });
     return this.formatExamResponse(updated);
@@ -668,7 +1031,9 @@ class ExamService {
       data: { status: 'completed' },
       include: this.buildExamIncludes(false),
     });
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on close', { examId, error: error.message });
+    });
 
     logger.info('Exam closed:', { examId, userId });
     return this.formatExamResponse(updated);
@@ -692,7 +1057,9 @@ class ExamService {
       data: { status: 'archived' },
       include: this.buildExamIncludes(false),
     });
-    await deleteCache(CacheKeys.examDetails(examId));
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on archive', { examId, error: error.message });
+    });
 
     logger.info('Exam archived:', { examId, userId });
     return this.formatExamResponse(updated);
@@ -708,11 +1075,11 @@ class ExamService {
     const normalizedStudentIds = Array.isArray(studentIds) ? studentIds : undefined;
 
     logger.info('Assigning exam:', {
-      examId,
-      assignmentData,
-      sectionIds: normalizedSectionIds,
-      departmentIds: normalizedDepartmentIds,
-      assignmentMode,
+        examId,
+        assignmentData,
+        sectionIds: normalizedSectionIds,
+        departmentIds: normalizedDepartmentIds,
+        assignmentMode,
     });
 
     const exam = await prisma.exam.findUnique({ where: { id: examId } });
@@ -729,6 +1096,109 @@ class ExamService {
         throw ApiError.forbidden('You can only assign exams in your institution');
       }
     }
+
+      // Verify course is active if exam is assigned to a course (Issue #27)
+      if (exam.courseId) {
+        const course = await prisma.course.findUnique({
+          where: { id: exam.courseId },
+          select: { id: true, isActive: true, code: true },
+        });
+        if (!course) {
+          throw ApiError.notFound('Course not found');
+        }
+        if (!course.isActive) {
+          throw ApiError.badRequest(
+            `Cannot assign exam to inactive course (${course.code}). Please activate the course first.`
+          );
+        }
+      }
+
+      // Validate sections exist and are active (Issue #27)
+      if (normalizedSectionIds !== undefined && normalizedSectionIds.length > 0) {
+        const sections = await prisma.section.findMany({
+          where: { id: { in: normalizedSectionIds } },
+          select: { id: true, name: true, isActive: true },
+        });
+      
+        if (sections.length !== normalizedSectionIds.length) {
+          const foundIds = sections.map(s => s.id);
+          const missingIds = normalizedSectionIds.filter(id => !foundIds.includes(id));
+          throw ApiError.badRequest(`Sections not found: ${missingIds.join(', ')}`);
+        }
+
+        const inactiveSections = sections.filter(s => !s.isActive);
+        if (inactiveSections.length > 0) {
+          const sectionNames = inactiveSections.map(s => s.name).join(', ');
+          logger.warn('Attempting to assign to inactive sections:', { sectionNames });
+          throw ApiError.badRequest(
+            `Cannot assign to inactive sections: ${sectionNames}`
+          );
+        }
+      }
+
+      // Validate departments exist and are active (Issue #27)
+      if (normalizedDepartmentIds !== undefined && normalizedDepartmentIds.length > 0) {
+        const departments = await prisma.department.findMany({
+          where: { id: { in: normalizedDepartmentIds } },
+          select: { id: true, name: true, isActive: true },
+        });
+
+        if (departments.length !== normalizedDepartmentIds.length) {
+          const foundIds = departments.map(d => d.id);
+          const missingIds = normalizedDepartmentIds.filter(id => !foundIds.includes(id));
+          throw ApiError.badRequest(`Departments not found: ${missingIds.join(', ')}`);
+        }
+
+        const inactiveDepartments = departments.filter(d => !d.isActive);
+        if (inactiveDepartments.length > 0) {
+          const deptNames = inactiveDepartments.map(d => d.name).join(', ');
+          logger.warn('Attempting to assign to inactive departments:', { deptNames });
+          throw ApiError.badRequest(
+            `Cannot assign to inactive departments: ${deptNames}`
+          );
+        }
+      }
+
+      // Validate individual students exist and have active enrollments if applicable (Issue #27)
+      if (normalizedStudentIds !== undefined && normalizedStudentIds.length > 0) {
+        const students = await prisma.user.findMany({
+          where: { 
+            id: { in: normalizedStudentIds },
+            role: 'student'
+          },
+          select: { id: true, firstName: true, lastName: true },
+        });
+
+        if (students.length !== normalizedStudentIds.length) {
+          const foundIds = students.map(s => s.id);
+          const missingIds = normalizedStudentIds.filter(id => !foundIds.includes(id));
+          throw ApiError.badRequest(`Students not found or not student role: ${missingIds.join(', ')}`);
+        }
+
+        // If assigning to a course, verify students are enrolled
+        if (exam.courseId) {
+          const enrollments = await prisma.studentEnrollment.findMany({
+            where: {
+              studentId: { in: normalizedStudentIds },
+              courseId: exam.courseId,
+              status: 'enrolled'
+            },
+            select: { studentId: true },
+          });
+
+          const enrolledIds = enrollments.map(e => e.studentId);
+          const notEnrolledIds = normalizedStudentIds.filter(id => !enrolledIds.includes(id));
+          if (notEnrolledIds.length > 0) {
+            const notEnrolledStudents = students
+              .filter(s => notEnrolledIds.includes(s.id))
+              .map(s => `${s.firstName} ${s.lastName}`)
+              .join(', ');
+            throw ApiError.badRequest(
+              `Students not enrolled in course: ${notEnrolledStudents}. Enroll them first.`
+            );
+          }
+        }
+      }
 
     // Use a batched transaction (array form) to avoid long interactive transaction timeouts.
     const txOps = [];
@@ -790,12 +1260,44 @@ class ExamService {
       logger.info(`Updated assignment mode to: ${assignmentMode}`);
     }
 
-    await deleteCache(CacheKeys.examDetails(examId));
     const updated = await prisma.exam.findUnique({
       where: { id: examId },
       include: this.buildExamIncludes(false),
     });
 
+    await invalidateExamCache(examId, exam.institutionId).catch((error) => {
+      logger.warn('Failed to invalidate cache on assign', { examId, error: error.message });
+    });
+
+    if (getFlagValue('websocketNotifications')) {
+      notifyInstitution(exam.institutionId, 'exam:assignment_updated', {
+        examId,
+        assignmentMode: updated.assignmentMode,
+      });
+
+      if (Array.isArray(normalizedStudentIds) && normalizedStudentIds.length > 0) {
+        await Promise.all(
+          normalizedStudentIds.map((studentId) =>
+            createNotification({
+              userId: studentId,
+              courseId: exam.courseId,
+              notificationType: 'exam_reminder',
+              title: 'New Exam Assigned',
+              message: `A new exam has been assigned to you. Please check your exams dashboard.`,
+              priority: 'medium',
+              actionUrl: `/student/exam/${examId}`,
+              metadata: { examId },
+            }).catch((error) => {
+              logger.warn('Failed to create assignment notification', {
+                examId,
+                studentId,
+                error: error.message,
+              });
+            })
+          )
+        );
+      }
+    }
     logger.info('Exam assignment completed:', {
       examId,
       assignedSections: updated.examSections?.map(s => s.sectionId),

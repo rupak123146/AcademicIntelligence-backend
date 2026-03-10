@@ -6,10 +6,27 @@
 const express = require('express');
 const router = express.Router();
 const interventionController = require('../controllers/interventionController');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, isEducatorOrAdmin } = require('../middleware/auth');
 
 // All routes require authentication
 router.use(authenticate);
+
+/**
+ * @route   GET /api/v1/interventions/my-interventions
+ * @desc    Get logged-in student's own interventions
+ * @access  Private (Student)
+ */
+router.get('/my-interventions', interventionController.getMyInterventions);
+
+// Routes below require educator or admin role
+router.use(isEducatorOrAdmin);
+
+/**
+ * @route   GET /api/v1/interventions/educator
+ * @desc    Get all interventions created by the logged-in educator
+ * @access  Private (Educator)
+ */
+router.get('/educator', interventionController.getEducatorInterventions);
 
 /**
  * @route   POST /api/v1/interventions/create
