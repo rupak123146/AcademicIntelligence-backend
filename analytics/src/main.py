@@ -169,18 +169,17 @@ async def ready_check():
     Readiness check with dependency verification.
     """
     checks = {
-        "postgres": False,
+        "mysql": False,
         "mongodb": False,
         "redis": False
     }
     
     try:
-        # Check PostgreSQL
-        async with db.pg_pool.acquire() as conn:
-            await conn.fetchval("SELECT 1")
-        checks["postgres"] = True
+        # Check MySQL
+        result = await db.pg_pool.fetchval("SELECT 1")
+        checks["mysql"] = result == 1
     except Exception as e:
-        logger.warning(f"PostgreSQL check failed: {e}")
+        logger.warning(f"MySQL check failed: {e}")
     
     try:
         # Check MongoDB

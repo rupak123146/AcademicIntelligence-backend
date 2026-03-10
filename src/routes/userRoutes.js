@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { prisma } = require('../config/database');
 const { authenticate } = require('../middleware/auth');
+const { paginate, buildPaginationMeta } = require('../utils/helpers');
 
 const buildUserProfile = (user) => {
   const baseProfile = {
@@ -250,7 +251,8 @@ router.get('/students/department/:departmentId', authenticate, async (req, res) 
     }
 
     const { departmentId } = req.params;
-    const { studentClass } = req.query;
+    const { studentClass, page, limit } = req.query;
+    const pagination = paginate(page, limit);
 
     const filter = {
       role: 'student',
@@ -262,15 +264,20 @@ router.get('/students/department/:departmentId', authenticate, async (req, res) 
       filter.class = studentClass;
     }
 
+    const total = await prisma.user.count({ where: filter });
+
     const students = await prisma.user.findMany({
       where: filter,
       orderBy: [{ class: 'asc' }, { rollNumber: 'asc' }],
+      skip: pagination.offset,
+      take: pagination.limit,
     });
 
     res.status(200).json({
       success: true,
       count: students.length,
       data: students,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     });
   } catch (error) {
     res.status(500).json({
@@ -300,6 +307,15 @@ router.get('/students', authenticate, async (req, res) => {
       });
     }
 
+    const pagination = paginate(req.query.page, req.query.limit);
+    const total = await prisma.user.count({
+      where: {
+        role: 'student',
+        departmentId: educator.departmentId,
+        profileCompleted: true,
+      },
+    });
+
     const students = await prisma.user.findMany({
       where: {
         role: 'student',
@@ -311,12 +327,15 @@ router.get('/students', authenticate, async (req, res) => {
         department: { select: { id: true, name: true, code: true } },
       },
       orderBy: { rollNumber: 'asc' },
+      skip: pagination.offset,
+      take: pagination.limit,
     });
 
     res.status(200).json({
       success: true,
       count: students.length,
       data: students,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     });
   } catch (error) {
     res.status(500).json({
@@ -406,20 +425,27 @@ router.get('/departments', authenticate, async (req, res) => {
       });
     }
 
+    const pagination = paginate(req.query.page, req.query.limit);
+
     const filter = { isActive: true };
     if (user.role === 'educator' && user.departmentId) {
       filter.id = user.departmentId;
     }
 
+    const total = await prisma.department.count({ where: filter });
+
     const departments = await prisma.department.findMany({
       where: filter,
       include: { headOfDepartment: { select: { firstName: true, lastName: true } } },
       orderBy: { code: 'asc' },
+      skip: pagination.offset,
+      take: pagination.limit,
     });
 
     res.status(200).json({
       success: true,
       data: departments,
+      meta: buildPaginationMeta(pagination.page, pagination.limit, total),
     });
   } catch (error) {
     res.status(500).json({

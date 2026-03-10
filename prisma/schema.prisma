@@ -459,6 +459,7 @@ model Exam {
 
   totalAttempts Int   @default(0)
   averageScore  Float @default(0)
+  version       Int   @default(0) // For optimistic locking
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -475,11 +476,13 @@ model Exam {
   examDepartments ExamDepartment[]
   examStudents    ExamStudent[]
   ExamActivityLog ExamActivityLog[]
+  auditLogs       ExamAuditLog[]
 
   @@index([createdById])
   @@index([status])
   @@index([startTime, endTime])
   @@index([institutionId])
+  @@index([status, endTime]) // For student visibility query
   @@map("exams")
 }
 
@@ -488,10 +491,11 @@ model ExamQuestion {
   questionId String
   orderIndex Int?
 
-  exam     Exam     @relation(fields: [examId], references: [id])
-  question Question @relation(fields: [questionId], references: [id])
+  exam     Exam     @relation(fields: [examId], references: [id], onDelete: Cascade)
+  question Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
 
   @@id([examId, questionId])
+  @@unique([examId, questionId]) // Prevent duplicate questions in exam
   @@map("exam_questions")
 }
 
@@ -518,13 +522,15 @@ model ExamAttempt {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  exam         Exam              @relation(fields: [examId], references: [id])
-  student      User              @relation(fields: [studentId], references: [id])
+  exam         Exam              @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student      User              @relation(fields: [studentId], references: [id], onDelete: Cascade)
   answers      StudentAnswer[]
   activityLogs ExamActivityLog[]
 
-  @@index([examId, studentId])
-  @@index([studentId, status])
+  @@unique([examId, studentId, attemptNumber]) // Prevent duplicate attempt numbers
+  @@index([examId, studentId, status]) // For race condition check
+  @@index([studentId, status]) // For active attempt queries
+  @@index([examId]) // For exam results
   @@map("exam_attempts")
 }
 
@@ -539,12 +545,13 @@ model StudentAnswer {
   marksAwarded      Float     @default(0)
   timeSpent         Int?
   answeredAt        DateTime?
+  answerHistory     Json?     // Store previous answers for audit trail
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  attempt  ExamAttempt @relation(fields: [attemptId], references: [id])
-  question Question    @relation(fields: [questionId], references: [id])
+  attempt  ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  question Question    @relation(fields: [questionId], references: [id], onDelete: Cascade)
 
   @@unique([attemptId, questionId])
   @@index([attemptId])
@@ -590,16 +597,33 @@ model ExamActivityLog {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  attempt  ExamAttempt @relation(fields: [attemptId], references: [id])
-  student  User        @relation(fields: [studentId], references: [id])
-  exam     Exam        @relation(fields: [examId], references: [id])
-  question Question?   @relation(fields: [questionId], references: [id])
+  attempt  ExamAttempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  student  User        @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  exam     Exam        @relation(fields: [examId], references: [id], onDelete: Cascade)
+  question Question?   @relation(fields: [questionId], references: [id], onDelete: SetNull)
 
   @@index([attemptId])
   @@index([studentId])
   @@index([examId])
   @@index([timestamp])
   @@map("exam_activity_logs")
+}
+
+model ExamAuditLog {
+  id        String   @id @default(cuid())
+  examId    String
+  userId    String
+  action    String   // 'created', 'updated', 'published', 'deleted'
+  changes   Json     // {field: oldValue -> newValue}
+  reason    String?
+  timestamp DateTime @default(now())
+
+  exam Exam @relation(fields: [examId], references: [id], onDelete: Cascade)
+
+  @@index([examId])
+  @@index([userId])
+  @@index([timestamp])
+  @@map("exam_audit_logs")
 }
 
 model ExamAssignment {
@@ -614,9 +638,9 @@ model ExamAssignment {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  exam       Exam   @relation(fields: [examId], references: [id])
-  course     Course @relation(fields: [courseId], references: [id])
-  assignedBy User?  @relation("ExamAssignedBy", fields: [assignedById], references: [id])
+  exam       Exam   @relation(fields: [examId], references: [id], onDelete: Cascade)
+  course     Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  assignedBy User?  @relation("ExamAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
 
   @@unique([examId, courseId])
   @@index([courseId])
@@ -713,8 +737,8 @@ model ExamSection {
   examId    String
   sectionId String
 
-  exam    Exam    @relation(fields: [examId], references: [id])
-  section Section @relation(fields: [sectionId], references: [id])
+  exam    Exam    @relation(fields: [examId], references: [id], onDelete: Cascade)
+  section Section @relation(fields: [sectionId], references: [id], onDelete: Cascade)
 
   @@id([examId, sectionId])
   @@map("exam_sections")
@@ -724,8 +748,8 @@ model ExamDepartment {
   examId       String
   departmentId String
 
-  exam       Exam       @relation(fields: [examId], references: [id])
-  department Department @relation(fields: [departmentId], references: [id])
+  exam       Exam       @relation(fields: [examId], references: [id], onDelete: Cascade)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
 
   @@id([examId, departmentId])
   @@map("exam_departments")
@@ -735,8 +759,8 @@ model ExamStudent {
   examId    String
   studentId String
 
-  exam    Exam @relation(fields: [examId], references: [id])
-  student User @relation(fields: [studentId], references: [id])
+  exam    Exam @relation(fields: [examId], references: [id], onDelete: Cascade)
+  student User @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@id([examId, studentId])
   @@map("exam_students")
@@ -774,6 +798,11 @@ enum NotificationType {
   intervention_alert
   achievement_unlocked
   deadline_approaching
+  exam_submitted
+  task_submitted
+  low_performance_alert
+  exam_completion_milestone
+  new_enrollment
 }
 
 enum InterventionStatus {
@@ -854,7 +883,7 @@ model Intervention {
   id                String             @id @default(cuid())
   studentId         String
   educatorId        String
-  courseId          String
+  courseId          String?
   interventionType  InterventionType
   status            InterventionStatus @default(planned)
   reason            String             @db.Text

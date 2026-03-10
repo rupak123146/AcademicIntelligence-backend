@@ -5,6 +5,9 @@
 
 const { prisma } = require('../config/database');
 const { successResponse, asyncHandler, ApiError } = require('../utils/helpers');
+const { paginate, buildPaginationMeta } = require('../utils/helpers');
+const { createNotification } = require('../services/notificationService');
+const { getFlagValue } = require('../services/featureFlagService');
 
 /**
  * Create a new goal
@@ -20,9 +23,11 @@ const createGoal = asyncHandler(async (req, res) => {
     description,
   } = req.body;
 
+  const ownerStudentId = req.user.role === 'student' ? req.user.id : studentId;
+
   const goal = await prisma.goal.create({
     data: {
-      studentId,
+      studentId: ownerStudentId,
       courseId,
       goalType,
       targetValue: parseFloat(targetValue),
@@ -30,6 +35,19 @@ const createGoal = asyncHandler(async (req, res) => {
       description: description || '',
     },
   });
+
+  if (getFlagValue('interventionsAndGoals')) {
+    await createNotification({
+      userId: ownerStudentId,
+      courseId,
+      notificationType: 'goal_milestone',
+      title: 'New Goal Created',
+      message: `Your ${goalType.replace(/_/g, ' ')} goal has been created.`,
+      priority: 'low',
+      actionUrl: '/student/analytics',
+      metadata: { goalId: goal.id },
+    }).catch(() => {});
+  }
 
   successResponse(res, 201, 'Goal created successfully', goal);
 });
@@ -40,19 +58,28 @@ const createGoal = asyncHandler(async (req, res) => {
  */
 const getStudentGoals = asyncHandler(async (req, res) => {
   const { studentId } = req.params;
-  const { courseId, status } = req.query;
+  const { courseId, status, page, limit } = req.query;
+  const pagination = paginate(page, limit);
+
+  if (req.user.role === 'student' && req.user.id !== studentId) {
+    throw ApiError.forbidden('You can only view your own goals');
+  }
 
   const where = { studentId };
   if (courseId) where.courseId = courseId;
   if (status) where.status = status;
 
+  const total = await prisma.goal.count({ where });
+
   const goals = await prisma.goal.findMany({
     where,
     include: { course: true },
     orderBy: { createdAt: 'desc' },
+    skip: pagination.offset,
+    take: pagination.limit,
   });
 
-  successResponse(res, 200, 'Goals retrieved successfully', goals);
+  successResponse(res, 200, 'Goals retrieved successfully', goals, buildPaginationMeta(pagination.page, pagination.limit, total));
 });
 
 /**
@@ -62,6 +89,19 @@ const getStudentGoals = asyncHandler(async (req, res) => {
 const updateGoalProgress = asyncHandler(async (req, res) => {
   const { goalId } = req.params;
   const { currentValue, notes } = req.body;
+
+  const existingGoal = await prisma.goal.findUnique({
+    where: { id: goalId },
+    select: { id: true, studentId: true },
+  });
+
+  if (!existingGoal) {
+    throw ApiError.notFound('Goal not found');
+  }
+
+  if (req.user.role === 'student' && req.user.id !== existingGoal.studentId) {
+    throw ApiError.forbidden('You can only update your own goals');
+  }
 
   const goal = await prisma.goal.update({
     where: { id: goalId },
@@ -73,10 +113,23 @@ const updateGoalProgress = asyncHandler(async (req, res) => {
 
   // Auto-complete goal if target reached
   if (goal.currentValue >= goal.targetValue && goal.status === 'active') {
-    await prisma.goal.update({
+    const completedGoal = await prisma.goal.update({
       where: { id: goalId },
       data: { status: 'completed' },
     });
+
+    if (getFlagValue('interventionsAndGoals')) {
+      await createNotification({
+        userId: completedGoal.studentId,
+        courseId: completedGoal.courseId,
+        notificationType: 'goal_milestone',
+        title: 'Goal Achieved',
+        message: 'Congratulations! You have achieved one of your learning goals.',
+        priority: 'medium',
+        actionUrl: '/student/analytics',
+        metadata: { goalId: completedGoal.id },
+      }).catch(() => {});
+    }
   }
 
   successResponse(res, 200, 'Goal progress updated', goal);

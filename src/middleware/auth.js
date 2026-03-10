@@ -1,8 +1,20 @@
 const { verifyAccessToken } = require('../utils/auth');
 const { ApiError } = require('../utils/helpers');
-const { getCache, CacheKeys } = require('../config/redis');
+const { getCache, setCache, CacheKeys } = require('../config/redis');
 const { prisma } = require('../config/database');
 const logger = require('../utils/logger');
+
+const isTransientDatabaseError = (error) => {
+  const code = error?.code;
+  const msg = String(error?.message || '').toLowerCase();
+
+  return (
+    ['P1001', 'P1017', 'P2024'].includes(code) ||
+    msg.includes('timed out fetching a new connection') ||
+    msg.includes("can't reach database server") ||
+    msg.includes('server has closed the connection')
+  );
+};
 
 /**
  * Authentication middleware
@@ -29,6 +41,20 @@ const authenticate = async (req, res, next) => {
     // Check if session is still valid (optional: check in Redis/DB)
     const sessionKey = CacheKeys.userSession(decoded.userId);
     const cachedSession = await getCache(sessionKey);
+
+    // Fast path: use cached session to avoid DB lookup on every request.
+    if (cachedSession?.userId === decoded.userId) {
+      req.user = {
+        id: cachedSession.userId,
+        email: cachedSession.email || decoded.email || '',
+        firstName: cachedSession.firstName || '',
+        lastName: cachedSession.lastName || '',
+        role: cachedSession.role || decoded.role,
+        institutionId: cachedSession.institutionId || decoded.institution_id,
+        departmentId: cachedSession.departmentId || null,
+      };
+      return next();
+    }
     
     // Get user from database to ensure they still exist and are active
     const user = await prisma.user.findUnique({
@@ -64,13 +90,29 @@ const authenticate = async (req, res, next) => {
       departmentId: user.departmentId,
     };
 
+    // Store richer user session snapshot to reduce DB dependency in middleware.
+    // TTL stays short (15 minutes) to balance freshness and resilience.
+    await setCache(sessionKey, {
+      userId: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      institutionId: user.institutionId,
+      departmentId: user.departmentId,
+    }, 900);
+
     next();
   } catch (error) {
     if (error instanceof ApiError) {
       next(error);
     } else {
       logger.error('Authentication error:', error);
-      next(ApiError.unauthorized('Authentication failed'));
+      if (isTransientDatabaseError(error)) {
+        next(ApiError.serviceUnavailable('Authentication service temporarily unavailable. Please retry.'));
+      } else {
+        next(ApiError.unauthorized('Authentication failed'));
+      }
     }
   }
 };

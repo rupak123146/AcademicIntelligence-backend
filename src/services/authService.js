@@ -8,6 +8,7 @@ const { setCache, getCache, deleteCache, CacheKeys } = require('../config/redis'
 const { hashPassword, comparePassword, generateTokenPair, verifyRefreshToken } = require('../utils/auth');
 const { ApiError, generateRandomString } = require('../utils/helpers');
 const logger = require('../utils/logger');
+const { createNotification } = require('./notificationService');
 
 class AuthService {
   /**
@@ -136,8 +137,12 @@ class AuthService {
     // Cache session
     await setCache(CacheKeys.userSession(user.id), {
       userId: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
       role: user.role,
       institutionId: user.institutionId,
+      departmentId: user.departmentId,
     }, 900);
 
     logger.info('User logged in:', { userId: user.id, email: user.email });
@@ -205,8 +210,12 @@ class AuthService {
 
     await setCache(CacheKeys.userSession(user.id), {
       userId: user.id,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
       role: user.role,
       institutionId: user.institutionId,
+      departmentId: user.departmentId,
     }, 900);
 
     return {
@@ -633,6 +642,42 @@ class AuthService {
     });
 
     logger.info('User updated by admin:', { userId, role: updateData.role || user.role, updates: Object.keys(updateData) });
+
+    // Notify educators when a student is assigned to their section
+    const effectiveRole = updateData.role || user.role;
+    if (effectiveRole === 'student' && updateData.sectionId && updateData.sectionId !== user.sectionId) {
+      try {
+        const studentUser = await prisma.user.findUnique({
+          where: { id: userId },
+          select: { firstName: true, lastName: true, studentId: true },
+        });
+        const sectionInfo = await prisma.section.findUnique({
+          where: { id: updateData.sectionId },
+          select: { name: true, year: true },
+        });
+        const educatorsInSection = await prisma.educatorSection.findMany({
+          where: { sectionId: updateData.sectionId },
+          select: { educatorId: true },
+        });
+        const sName = studentUser ? `${studentUser.firstName} ${studentUser.lastName}` : 'A student';
+        const sLabel = studentUser?.studentId ? ` (${studentUser.studentId})` : '';
+        const secName = sectionInfo ? `${sectionInfo.year}${['st','nd','rd','th'][sectionInfo.year - 1] || 'th'} Year - Section ${sectionInfo.name}` : 'your section';
+
+        for (const { educatorId } of educatorsInSection) {
+          await createNotification({
+            userId: educatorId,
+            notificationType: 'new_enrollment',
+            title: 'New Student Enrolled',
+            message: `${sName}${sLabel} has been assigned to ${secName}.`,
+            priority: 'low',
+            actionUrl: '/educator/students',
+            metadata: { studentId: userId, sectionId: updateData.sectionId },
+          }).catch(() => {});
+        }
+      } catch (error) {
+        logger.warn('Failed to send enrollment notifications', { userId, error: error.message });
+      }
+    }
 
     const updatedUser = await prisma.user.findUnique({
       where: { id: userId },

@@ -33,6 +33,9 @@ const getExams = asyncHandler(async (req, res) => {
     subjectId: req.query.subjectId,
     status: req.query.status,
     examType: req.query.examType,
+    assignmentMode: req.query.assignmentMode,
+    minDuration: req.query.minDuration,
+    maxDuration: req.query.maxDuration,
     search: req.query.search,
     startDate: req.query.startDate,
     endDate: req.query.endDate,
@@ -66,6 +69,15 @@ const getMyAttempts = asyncHandler(async (req, res) => {
 const getExamById = asyncHandler(async (req, res) => {
   const exam = await examService.getExamById(req.params.id, req.user.id, req.user.role);
   successResponse(res, 200, 'Exam retrieved successfully', exam);
+});
+
+/**
+ * Get exam preview (metadata only)
+ * GET /api/v1/exams/:id/preview
+ */
+const getExamPreview = asyncHandler(async (req, res) => {
+  const preview = await examService.getExamPreview(req.params.id, req.user.id, req.user.role);
+  successResponse(res, 200, 'Exam preview retrieved successfully', preview);
 });
 
 /**
@@ -295,6 +307,17 @@ const markForReview = asyncHandler(async (req, res) => {
 });
 
 /**
+ * Skip question (mark as unanswered)
+ * PUT /api/v1/exams/:examId/attempts/:attemptId/skip
+ */
+const skipQuestion = asyncHandler(async (req, res) => {
+  const { attemptId } = req.params;
+  const { questionId } = req.body;
+  const result = await attemptService.skipQuestion(attemptId, questionId, req.user.id);
+  successResponse(res, 200, 'Question skipped', result);
+});
+
+/**
  * Submit exam attempt
  * POST /api/v1/exams/:examId/attempts/:attemptId/submit
  * POST /api/v1/exams/attempts/:attemptId/submit
@@ -376,6 +399,7 @@ module.exports = {
   getExams,
   getAvailableExams,
   getExamById,
+  getExamPreview,
   updateExam,
   deleteExam,
   
@@ -403,6 +427,7 @@ module.exports = {
   resumeAttempt,
   saveAnswer,
   markForReview,
+  skipQuestion,
   submitAttempt,
   getAttemptResult,
   getAttempt,

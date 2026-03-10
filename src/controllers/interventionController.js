@@ -5,6 +5,9 @@
 
 const { prisma } = require('../config/database');
 const { successResponse, asyncHandler, ApiError } = require('../utils/helpers');
+const { paginate, buildPaginationMeta } = require('../utils/helpers');
+const { createNotification } = require('../services/notificationService');
+const { getFlagValue } = require('../services/featureFlagService');
 
 /**
  * Create intervention
@@ -26,7 +29,7 @@ const createIntervention = asyncHandler(async (req, res) => {
     data: {
       studentId,
       educatorId,
-      courseId,
+      courseId: courseId || null,
       interventionType,
       reason,
       plannedActions,
@@ -34,6 +37,19 @@ const createIntervention = asyncHandler(async (req, res) => {
       estimatedDuration: estimatedDuration || null,
     },
   });
+
+  if (getFlagValue('interventionsAndGoals')) {
+    await createNotification({
+      userId: studentId,
+      courseId: courseId || null,
+      notificationType: 'intervention_alert',
+      title: 'New Learning Intervention',
+      message: 'Your educator has created a support intervention for your progress.',
+      priority: 'high',
+      actionUrl: '/student/interventions',
+      metadata: { interventionId: intervention.id },
+    }).catch(() => {});
+  }
 
   successResponse(res, 201, 'Intervention created successfully', intervention);
 });
@@ -54,6 +70,19 @@ const startIntervention = asyncHandler(async (req, res) => {
       notes: notes || '',
     },
   });
+
+  if (getFlagValue('interventionsAndGoals')) {
+    await createNotification({
+      userId: intervention.studentId,
+      courseId: intervention.courseId,
+      notificationType: 'intervention_alert',
+      title: 'Intervention Started',
+      message: 'Your intervention plan is now active.',
+      priority: 'medium',
+      actionUrl: '/student/interventions',
+      metadata: { interventionId: intervention.id },
+    }).catch(() => {});
+  }
 
   successResponse(res, 200, 'Intervention started', intervention);
 });
@@ -95,6 +124,19 @@ const recordInterventionOutcome = asyncHandler(async (req, res) => {
       targetMetrics: finalMetrics || {},
     },
   });
+
+  if (getFlagValue('interventionsAndGoals')) {
+    await createNotification({
+      userId: intervention.studentId,
+      courseId: intervention.courseId,
+      notificationType: 'intervention_alert',
+      title: 'Intervention Completed',
+      message: 'Your intervention has been marked as completed.',
+      priority: 'medium',
+      actionUrl: '/student/interventions',
+      metadata: { interventionId: intervention.id },
+    }).catch(() => {});
+  }
 
   successResponse(res, 200, 'Intervention outcome recorded', intervention);
 });
@@ -147,20 +189,25 @@ const getInterventionDetails = asyncHandler(async (req, res) => {
  */
 const getStudentInterventions = asyncHandler(async (req, res) => {
   const { studentId } = req.params;
-  const { courseId, status, interventionType } = req.query;
+  const { courseId, status, interventionType, page, limit } = req.query;
+  const pagination = paginate(page, limit);
 
   const where = { studentId };
   if (courseId) where.courseId = courseId;
   if (status) where.status = status;
   if (interventionType) where.interventionType = interventionType;
 
+  const total = await prisma.intervention.count({ where });
+
   const interventions = await prisma.intervention.findMany({
     where,
     include: { checkins: true },
     orderBy: { createdAt: 'desc' },
+    skip: pagination.offset,
+    take: pagination.limit,
   });
 
-  successResponse(res, 200, 'Student interventions retrieved', interventions);
+  successResponse(res, 200, 'Student interventions retrieved', interventions, buildPaginationMeta(pagination.page, pagination.limit, total));
 });
 
 /**
@@ -208,6 +255,94 @@ const getInterventionEffectiveness = asyncHandler(async (req, res) => {
   successResponse(res, 200, 'Intervention effectiveness data retrieved', effectiveness);
 });
 
+/**
+ * Get educator's interventions
+ * GET /api/v1/interventions/educator
+ */
+const getEducatorInterventions = asyncHandler(async (req, res) => {
+  const educatorId = req.user.id;
+  const { status, interventionType, page, limit } = req.query;
+  const pagination = paginate(page, limit);
+
+  const where = { educatorId };
+  if (status) where.status = status;
+  if (interventionType) where.interventionType = interventionType;
+
+  const total = await prisma.intervention.count({ where });
+
+  const interventions = await prisma.intervention.findMany({
+    where,
+    include: {
+      checkins: { orderBy: { checkinDate: 'desc' } },
+    },
+    orderBy: { createdAt: 'desc' },
+    skip: pagination.offset,
+    take: pagination.limit,
+  });
+
+  // Enrich with student names
+  const studentIds = [...new Set(interventions.map(i => i.studentId))];
+  const students = await prisma.user.findMany({
+    where: { id: { in: studentIds } },
+    select: { id: true, firstName: true, lastName: true, studentId: true },
+  });
+  const studentMap = Object.fromEntries(students.map(s => [s.id, s]));
+
+  const enriched = interventions.map(i => {
+    const student = studentMap[i.studentId];
+    return {
+      ...i,
+      studentName: student ? `${student.firstName} ${student.lastName}` : 'Unknown',
+      studentUsn: student?.studentId || null,
+    };
+  });
+
+  successResponse(res, 200, 'Educator interventions retrieved', enriched, buildPaginationMeta(pagination.page, pagination.limit, total));
+});
+
+/**
+ * Get student's own interventions
+ * GET /api/v1/interventions/my-interventions
+ */
+const getMyInterventions = asyncHandler(async (req, res) => {
+  const studentId = req.user.id;
+  const { status, page, limit } = req.query;
+  const pagination = paginate(page, limit);
+
+  const where = { studentId };
+  if (status) where.status = status;
+
+  const total = await prisma.intervention.count({ where });
+
+  const interventions = await prisma.intervention.findMany({
+    where,
+    include: {
+      checkins: { orderBy: { checkinDate: 'desc' } },
+    },
+    orderBy: { createdAt: 'desc' },
+    skip: pagination.offset,
+    take: pagination.limit,
+  });
+
+  // Enrich with educator names
+  const educatorIds = [...new Set(interventions.map(i => i.educatorId))];
+  const educators = await prisma.user.findMany({
+    where: { id: { in: educatorIds } },
+    select: { id: true, firstName: true, lastName: true },
+  });
+  const educatorMap = Object.fromEntries(educators.map(e => [e.id, e]));
+
+  const enriched = interventions.map(i => {
+    const educator = educatorMap[i.educatorId];
+    return {
+      ...i,
+      educatorName: educator ? `${educator.firstName} ${educator.lastName}` : 'Unknown',
+    };
+  });
+
+  successResponse(res, 200, 'Student interventions retrieved', enriched, buildPaginationMeta(pagination.page, pagination.limit, total));
+});
+
 module.exports = {
   createIntervention,
   startIntervention,
@@ -216,5 +351,7 @@ module.exports = {
   completeIntervention,
   getInterventionDetails,
   getStudentInterventions,
+  getEducatorInterventions,
+  getMyInterventions,
   getInterventionEffectiveness,
 };

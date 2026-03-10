@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const { authenticate, authorize } = require('../middleware/auth');
-const { successResponse, asyncHandler } = require('../utils/helpers');
+const { successResponse, asyncHandler, ApiError } = require('../utils/helpers');
 const { prisma } = require('../config/database');
+const { listFlags, setFlag } = require('../services/featureFlagService');
 
 /**
  * @route GET /api/v1/settings/institution
@@ -71,6 +72,35 @@ router.put('/institution', authenticate, authorize('admin'), asyncHandler(async 
 
   successResponse(res, 200, 'Institution settings updated successfully', {
     message: 'Settings saved',
+  });
+}));
+
+/**
+ * @route GET /api/v1/settings/feature-flags
+ * @desc Get current feature flags
+ * @access Private (Admin)
+ */
+router.get('/feature-flags', authenticate, authorize('admin'), asyncHandler(async (_req, res) => {
+  successResponse(res, 200, 'Feature flags retrieved', listFlags());
+}));
+
+/**
+ * @route PUT /api/v1/settings/feature-flags/:flagName
+ * @desc Update a feature flag
+ * @access Private (Admin)
+ */
+router.put('/feature-flags/:flagName', authenticate, authorize('admin'), asyncHandler(async (req, res) => {
+  const { flagName } = req.params;
+  const { enabled } = req.body;
+  const updated = setFlag(flagName, !!enabled);
+
+  if (!updated) {
+    throw ApiError.badRequest(`Unknown feature flag: ${flagName}`);
+  }
+
+  successResponse(res, 200, 'Feature flag updated', {
+    flagName,
+    enabled: !!enabled,
   });
 }));
 

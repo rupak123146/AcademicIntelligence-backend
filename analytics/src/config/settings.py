@@ -2,7 +2,8 @@
 🎓 Academic Intelligence Platform - Analytics Engine Configuration
 """
 
-from typing import List, Optional
+import re
+from typing import Dict, List, Optional
 from pydantic import Field
 from pydantic_settings import BaseSettings
 
@@ -53,6 +54,14 @@ class Settings(BaseSettings):
     )
     backend_api_key: Optional[str] = Field(default=None, alias="BACKEND_API_KEY")
     
+    # MySQL (same database as the Node.js backend uses via Prisma)
+    database_url: Optional[str] = Field(default=None, alias="DATABASE_URL")
+    mysql_host: str = Field(default="localhost", alias="MYSQL_HOST")
+    mysql_port: int = Field(default=3306, alias="MYSQL_PORT")
+    mysql_user: str = Field(default="admin", alias="MYSQL_USER")
+    mysql_password: str = Field(default="", alias="MYSQL_PASSWORD")
+    mysql_database: str = Field(default="academic", alias="MYSQL_DATABASE")
+    
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(default="json", alias="LOG_FORMAT")
@@ -94,6 +103,32 @@ class Settings(BaseSettings):
     def is_production(self) -> bool:
         """Check if running in production."""
         return self.app_env.lower() == "production"
+
+    @property
+    def mysql_connection_params(self) -> Dict[str, object]:
+        """Parse DATABASE_URL or use individual MySQL env vars."""
+        if self.database_url:
+            # Parse mysql://user:pass@host:port/db or similar Prisma URLs
+            url = self.database_url
+            # Strip protocol prefix
+            url = re.sub(r'^mysql://|^mysql2://|^prisma\+mysql://', '', url)
+            # user:pass@host:port/db?params
+            m = re.match(r'([^:]+):([^@]*)@([^:/?]+):?(\d+)?/([^?]+)', url)
+            if m:
+                return {
+                    "user": m.group(1),
+                    "password": m.group(2),
+                    "host": m.group(3),
+                    "port": int(m.group(4) or 3306),
+                    "database": m.group(5),
+                }
+        return {
+            "host": self.mysql_host,
+            "port": self.mysql_port,
+            "user": self.mysql_user,
+            "password": self.mysql_password,
+            "database": self.mysql_database,
+        }
     
     class Config:
         env_file = ".env"

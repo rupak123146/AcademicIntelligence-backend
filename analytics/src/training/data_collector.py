@@ -47,54 +47,34 @@ class TrainingDataCollector:
         try:
             cutoff_date = datetime.now() - timedelta(days=time_window_days)
             
-            # Query students with their performance metrics
+            # Query students with their performance metrics (MySQL-compatible)
             query = """
-                WITH student_performance AS (
-                    SELECT 
-                        u.id as student_id,
-                        u.first_name || ' ' || u.last_name as student_name,
-                        COUNT(DISTINCT ea.id) as total_attempts,
-                        AVG(ea.score) as avg_score,
-                        STDDEV(ea.score) as score_variance,
-                        MIN(ea.score) as min_score,
-                        MAX(ea.score) as max_score,
-                        COUNT(DISTINCT CASE WHEN ea.score < 50 THEN ea.id END) as failed_attempts,
-                        AVG(EXTRACT(EPOCH FROM (ea.submitted_at - ea.started_at))/60) as avg_time_minutes,
-                        COUNT(DISTINCT ea.exam_id) as unique_exams_taken
-                    FROM users u
-                    LEFT JOIN exam_attempts ea ON u.id = ea.student_id
-                    WHERE u.role = 'student'
-                        AND ea.status IN ('submitted', 'auto_submitted', 'graded')
-                        AND ea.created_at >= $1
-                    GROUP BY u.id, u.first_name, u.last_name
-                    HAVING COUNT(DISTINCT ea.id) >= 3
-                ),
-                student_trends AS (
-                    SELECT 
-                        ea.student_id,
-                        CASE 
-                            WHEN COUNT(*) >= 2 THEN
-                                REGR_SLOPE(ea.score, EXTRACT(EPOCH FROM ea.submitted_at))
-                            ELSE 0
-                        END as score_trend
-                    FROM exam_attempts ea
-                    WHERE ea.status IN ('submitted', 'auto_submitted', 'graded')
-                        AND ea.created_at >= $1
-                    GROUP BY ea.student_id
-                )
                 SELECT 
-                    sp.*,
-                    COALESCE(st.score_trend, 0) as score_trend,
+                    u.id as student_id,
+                    CONCAT(u.firstName, ' ', u.lastName) as student_name,
+                    COUNT(DISTINCT ea.id) as total_attempts,
+                    AVG(ea.percentage) as avg_score,
+                    STDDEV(ea.percentage) as score_variance,
+                    MIN(ea.percentage) as min_score,
+                    MAX(ea.percentage) as max_score,
+                    COUNT(DISTINCT CASE WHEN ea.percentage < 50 THEN ea.id END) as failed_attempts,
+                    AVG(ea.timeTaken / 60.0) as avg_time_minutes,
+                    COUNT(DISTINCT ea.examId) as unique_exams_taken,
                     CASE 
-                        WHEN sp.avg_score < 50 
-                            OR sp.failed_attempts::float / NULLIF(sp.total_attempts, 0) > 0.5
-                            OR st.score_trend < -2 
+                        WHEN AVG(ea.percentage) < 50 
+                            OR (COUNT(DISTINCT CASE WHEN ea.percentage < 50 THEN ea.id END) / 
+                                NULLIF(COUNT(DISTINCT ea.id), 0)) > 0.5
                         THEN 1
                         ELSE 0
                     END as is_at_risk
-                FROM student_performance sp
-                LEFT JOIN student_trends st ON sp.student_id = st.student_id
-                ORDER BY sp.student_id;
+                FROM users u
+                LEFT JOIN exam_attempts ea ON u.id = ea.studentId
+                WHERE u.role = 'student'
+                    AND ea.status IN ('submitted', 'auto_submitted', 'graded')
+                    AND ea.createdAt >= $1
+                GROUP BY u.id, u.firstName, u.lastName
+                HAVING COUNT(DISTINCT ea.id) >= 3
+                ORDER BY u.id
             """
             
             async with self.pool.acquire() as conn:
@@ -164,32 +144,31 @@ class TrainingDataCollector:
         logger.info("Collecting feedback generation training data...")
         
         try:
-            # Query existing feedback from educators
+            # Query existing feedback data (MySQL-compatible)
             query = """
                 SELECT 
                     u.id as student_id,
-                    u.first_name || ' ' || u.last_name as student_name,
-                    ea.score,
-                    ea.exam_id,
+                    CONCAT(u.firstName, ' ', u.lastName) as student_name,
+                    ea.percentage as score,
+                    ea.examId as exam_id,
                     e.title as exam_title,
-                    -- Simulated feedback (in production, get from actual educator comments)
                     CASE 
-                        WHEN ea.score >= 90 THEN 'Excellent work! Keep maintaining high standards.'
-                        WHEN ea.score >= 75 THEN 'Good performance. Focus on areas of weakness.'
-                        WHEN ea.score >= 60 THEN 'Satisfactory. More practice needed in key concepts.'
+                        WHEN ea.percentage >= 90 THEN 'Excellent work! Keep maintaining high standards.'
+                        WHEN ea.percentage >= 75 THEN 'Good performance. Focus on areas of weakness.'
+                        WHEN ea.percentage >= 60 THEN 'Satisfactory. More practice needed in key concepts.'
                         ELSE 'Needs significant improvement. Seek additional help.'
                     END as educator_feedback,
                     COUNT(DISTINCT sa.id) as total_questions,
-                    SUM(CASE WHEN sa.is_correct THEN 1 ELSE 0 END) as correct_answers
+                    SUM(CASE WHEN sa.isCorrect = 1 THEN 1 ELSE 0 END) as correct_answers
                 FROM exam_attempts ea
-                JOIN users u ON ea.student_id = u.id
-                JOIN exams e ON ea.exam_id = e.id
-                LEFT JOIN student_answers sa ON ea.id = sa.attempt_id
-                WHERE ea.status IN ('submitted', 'graded')
-                    AND ea.score IS NOT NULL
-                GROUP BY u.id, u.first_name, u.last_name, ea.score, ea.exam_id, e.title, ea.id
+                JOIN users u ON ea.studentId = u.id
+                JOIN exams e ON ea.examId = e.id
+                LEFT JOIN student_answers sa ON ea.id = sa.attemptId
+                WHERE ea.status IN ('submitted', 'auto_submitted', 'graded')
+                    AND ea.percentage IS NOT NULL
+                GROUP BY u.id, u.firstName, u.lastName, ea.percentage, ea.examId, e.title, ea.id
                 HAVING COUNT(DISTINCT sa.id) > 0
-                LIMIT $1;
+                LIMIT $1
             """
             
             async with self.pool.acquire() as conn:

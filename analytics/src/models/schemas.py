@@ -83,7 +83,7 @@ class TimestampMixin(BaseModel):
 
 class ChapterPerformance(BaseSchema):
     """Individual chapter performance metrics."""
-    chapter_id: int
+    chapter_id: str
     chapter_name: str
     total_questions: int
     correct_answers: int
@@ -98,9 +98,9 @@ class ChapterPerformance(BaseSchema):
 
 class ChapterAnalysisResponse(BaseSchema):
     """Response for chapter-wise analysis."""
-    student_id: int
-    exam_id: Optional[int] = None
-    course_id: int
+    student_id: str
+    exam_id: Optional[str] = None
+    course_id: str
     analysis_date: datetime
     chapters: List[ChapterPerformance]
     overall_accuracy: float
@@ -114,9 +114,9 @@ class ChapterAnalysisResponse(BaseSchema):
 
 class ConceptPerformance(BaseSchema):
     """Individual concept performance metrics."""
-    concept_id: int
+    concept_id: str
     concept_name: str
-    chapter_id: int
+    chapter_id: str
     chapter_name: str
     total_attempts: int
     correct_attempts: int
@@ -125,15 +125,15 @@ class ConceptPerformance(BaseSchema):
     time_efficiency: float = Field(..., ge=0, le=100)
     consistency: float = Field(..., ge=0, le=100)
     mastery_level: MasteryLevel
-    prerequisites: List[int] = []
+    prerequisites: List[str] = []
     is_prerequisite_weak: bool = False
 
 
 class ConceptAnalysisResponse(BaseSchema):
     """Response for concept-wise analysis."""
-    student_id: int
-    chapter_id: Optional[int] = None
-    course_id: int
+    student_id: str
+    chapter_id: Optional[str] = None
+    course_id: str
     analysis_date: datetime
     concepts: List[ConceptPerformance]
     mastered_concepts: int
@@ -158,9 +158,9 @@ class DifficultyPerformance(BaseSchema):
 
 class DifficultyAnalysisResponse(BaseSchema):
     """Response for difficulty-wise analysis."""
-    student_id: int
-    exam_id: Optional[int] = None
-    course_id: Optional[int] = None
+    student_id: str
+    exam_id: Optional[str] = None
+    course_id: Optional[str] = None
     analysis_date: datetime
     difficulty_breakdown: Dict[DifficultyLevel, DifficultyPerformance]
     difficulty_transition_issue: bool = False
@@ -176,11 +176,11 @@ class LearningGap(BaseSchema):
     gap_id: str
     gap_type: GapType
     severity: GapSeverity
-    chapter_id: Optional[int] = None
+    chapter_id: Optional[str] = None
     chapter_name: Optional[str] = None
-    concept_id: Optional[int] = None
+    concept_id: Optional[str] = None
     concept_name: Optional[str] = None
-    prerequisite_id: Optional[int] = None
+    prerequisite_id: Optional[str] = None
     prerequisite_name: Optional[str] = None
     current_accuracy: float
     target_accuracy: float = 70.0
@@ -192,8 +192,8 @@ class LearningGap(BaseSchema):
 
 class LearningGapsResponse(BaseSchema):
     """Response for learning gaps detection."""
-    student_id: int
-    course_id: int
+    student_id: str
+    course_id: str
     analysis_date: datetime
     total_gaps: int
     critical_gaps: int
@@ -208,7 +208,7 @@ class LearningGapsResponse(BaseSchema):
 
 class TrendDataPoint(BaseSchema):
     """Single data point in trend."""
-    exam_id: int
+    exam_id: str
     exam_date: datetime
     score: float
     exam_title: Optional[str] = None
@@ -216,8 +216,8 @@ class TrendDataPoint(BaseSchema):
 
 class PerformanceTrend(BaseSchema):
     """Performance trend analysis."""
-    student_id: int
-    course_id: int
+    student_id: str
+    course_id: str
     analysis_date: datetime
     direction: TrendDirection
     slope: float  # Rate of change
@@ -243,17 +243,17 @@ class FeedbackItem(BaseSchema):
     priority: GapSeverity
     title: str
     description: str
-    related_chapter_id: Optional[int] = None
-    related_concept_id: Optional[int] = None
+    related_chapter_id: Optional[str] = None
+    related_concept_id: Optional[str] = None
     action_items: List[str] = []
     resources: List[Dict[str, str]] = []  # [{title, url}]
 
 
 class PersonalizedFeedback(BaseSchema):
     """Complete personalized feedback for a student."""
-    student_id: int
-    exam_id: Optional[int] = None
-    course_id: int
+    student_id: str
+    exam_id: Optional[str] = None
+    course_id: str
     generated_at: datetime
     overall_score: Optional[float] = None
     grade: Optional[str] = None
@@ -291,9 +291,9 @@ class GradeDistribution(BaseSchema):
 
 class WeakArea(BaseSchema):
     """Common weak area in class."""
-    chapter_id: int
+    chapter_id: str
     chapter_name: str
-    concept_id: Optional[int] = None
+    concept_id: Optional[str] = None
     concept_name: Optional[str] = None
     class_accuracy: float
     students_struggling: int
@@ -302,7 +302,7 @@ class WeakArea(BaseSchema):
 
 class QuestionEffectiveness(BaseSchema):
     """Question item analysis."""
-    question_id: int
+    question_id: str
     question_text: Optional[str] = None
     difficulty_index: float = Field(..., ge=0, le=1)  # % who got it right
     discrimination_index: float = Field(..., ge=-1, le=1)  # How well it differentiates
@@ -314,7 +314,7 @@ class QuestionEffectiveness(BaseSchema):
 
 class AtRiskStudent(BaseSchema):
     """Student at risk of failing."""
-    student_id: int
+    student_id: str
     student_name: str
     current_score: Optional[float] = None
     trend: TrendDirection
@@ -325,9 +325,9 @@ class AtRiskStudent(BaseSchema):
 
 class ClassAnalyticsResponse(BaseSchema):
     """Complete class analytics for educator."""
-    course_id: int
-    exam_id: Optional[int] = None
-    educator_id: int
+    course_id: str
+    exam_id: Optional[str] = None
+    educator_id: str
     analysis_date: datetime
     statistics: ClassStatistics
     grade_distribution: List[GradeDistribution]
@@ -343,9 +343,9 @@ class ClassAnalyticsResponse(BaseSchema):
 
 class StudentDashboard(BaseSchema):
     """Student dashboard data."""
-    student_id: int
+    student_id: str
     student_name: str
-    course_id: Optional[int] = None
+    course_id: Optional[str] = None
     
     # Overview
     total_exams_taken: int
@@ -376,7 +376,7 @@ class StudentDashboard(BaseSchema):
 
 class EducatorDashboard(BaseSchema):
     """Educator dashboard data."""
-    educator_id: int
+    educator_id: str
     educator_name: str
     
     # Overview

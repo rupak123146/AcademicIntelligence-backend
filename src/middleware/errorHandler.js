@@ -38,6 +38,9 @@ const errorHandler = (err, req, res, next) => {
 
   // Handle Prisma errors
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
+    if (['P1001', 'P1017', 'P2024'].includes(err.code)) {
+      return errorResponse(res, ApiError.serviceUnavailable('Database temporarily unavailable. Please retry shortly.'));
+    }
     if (err.code === 'P2002') {
       return errorResponse(res, ApiError.conflict('Duplicate entry'));
     }

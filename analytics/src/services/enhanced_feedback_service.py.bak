@@ -323,7 +323,7 @@ class EnhancedFeedbackService:
                     SELECT id, examId, studentId, status, percentage, totalScore,
                            maxScore, grade, correctAnswers, wrongAnswers, skipped
                     FROM exam_attempts 
-                    WHERE studentId = %s AND examId = %s
+                    WHERE studentId = $1 AND examId = $2
                     ORDER BY submittedAt DESC LIMIT 1
                 """, student_id, exam_id)
                 data['attempt'] = dict(attempt) if attempt else {}
@@ -333,12 +333,16 @@ class EnhancedFeedbackService:
                 SELECT 
                     AVG(percentage) as avg_score,
                     COUNT(*) as total_exams,
-                    SUM(CASE WHEN percentage >= 40 THEN 1 ELSE 0 END) as passed,
+                    COUNT(CASE WHEN percentage >= 40 THEN 1 END) as passed,
                     MIN(percentage) as min_score,
                     MAX(percentage) as max_score
                 FROM exam_attempts
-                WHERE studentId = %s
-                    AND status IN ('submitted', 'auto_submitted', 'graded')
+                WHERE studentId = $1 AND examId IN (
+                    SELECT id FROM exams WHERE id IN (
+                        SELECT examId FROM exam_attempts WHERE studentId = $1
+                    )
+                )
+                AND status IN ('submitted', 'auto_submitted', 'graded')
             """, student_id)
             
             if performance:
@@ -347,15 +351,14 @@ class EnhancedFeedbackService:
             # Get weak areas from student answers
             weak_areas = await self.pool.fetch("""
                 SELECT 
-                    ch.name as name,
+                    q.chapter as name,
                     AVG(CASE WHEN sa.isCorrect = 1 THEN 100.0 ELSE 0.0 END) as accuracy
                 FROM student_answers sa
                 JOIN questions q ON sa.questionId = q.id
-                JOIN chapters ch ON q.chapterId = ch.id
                 JOIN exam_attempts ea ON sa.attemptId = ea.id
-                WHERE ea.studentId = %s
-                    AND q.chapterId IS NOT NULL
-                GROUP BY ch.id, ch.name
+                WHERE ea.studentId = $1
+                    AND q.chapter IS NOT NULL
+                GROUP BY q.chapter
                 HAVING AVG(CASE WHEN sa.isCorrect = 1 THEN 100.0 ELSE 0.0 END) < 70
                 ORDER BY accuracy ASC
                 LIMIT 5

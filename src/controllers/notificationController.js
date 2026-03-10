@@ -4,13 +4,31 @@
  */
 
 const { prisma } = require('../config/database');
-const { successResponse, asyncHandler, ApiError } = require('../utils/helpers');
+const { successResponse, asyncHandler, ApiError, paginate, buildPaginationMeta } = require('../utils/helpers');
+
+const getNotificationDelegate = () => {
+  if (!prisma?.notification) {
+    throw ApiError.internal('Notification storage is not available. Please regenerate Prisma client and restart backend.');
+  }
+  return prisma.notification;
+};
+
+const getNotificationPreferencesDelegate = () => {
+  if (!prisma?.notificationPreferences) {
+    throw ApiError.internal('Notification preferences storage is not available. Please regenerate Prisma client and restart backend.');
+  }
+  return prisma.notificationPreferences;
+};
 
 /**
  * Send notification to student
  * POST /api/v1/notifications/send
  */
 const sendNotification = asyncHandler(async (req, res) => {
+  if (!['educator', 'admin', 'super_admin'].includes(req.user.role)) {
+    throw ApiError.forbidden('Only educators and admins can send notifications');
+  }
+
   const {
     studentId,
     courseId,
@@ -22,7 +40,9 @@ const sendNotification = asyncHandler(async (req, res) => {
     metadata,
   } = req.body;
 
-  const notification = await prisma.notification.create({
+  const notificationDelegate = getNotificationDelegate();
+
+  const notification = await notificationDelegate.create({
     data: {
       userId: studentId,
       courseId: courseId || null,
@@ -44,19 +64,35 @@ const sendNotification = asyncHandler(async (req, res) => {
  */
 const getUserNotifications = asyncHandler(async (req, res) => {
   const { userId } = req.params;
-  const { unreadOnly, notificationType, limit } = req.query;
+  const { unreadOnly, notificationType, page, limit } = req.query;
+
+  if (req.user.role === 'student' && req.user.id !== userId) {
+    throw ApiError.forbidden('You can only view your own notifications');
+  }
+
+  const pagination = paginate(page, limit, 100);
+  const notificationDelegate = getNotificationDelegate();
 
   const where = { userId };
   if (unreadOnly === 'true') where.isRead = false;
   if (notificationType) where.notificationType = notificationType;
 
-  const notifications = await prisma.notification.findMany({
+  const total = await notificationDelegate.count({ where });
+
+  const notifications = await notificationDelegate.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    take: limit ? parseInt(limit) : 50,
+    skip: pagination.offset,
+    take: pagination.limit,
   });
 
-  successResponse(res, 200, 'Notifications retrieved successfully', notifications);
+  successResponse(
+    res,
+    200,
+    'Notifications retrieved successfully',
+    notifications,
+    buildPaginationMeta(pagination.page, pagination.limit, total)
+  );
 });
 
 /**
@@ -66,7 +102,22 @@ const getUserNotifications = asyncHandler(async (req, res) => {
 const markNotificationRead = asyncHandler(async (req, res) => {
   const { notificationId } = req.params;
 
-  const notification = await prisma.notification.update({
+  const notificationDelegate = getNotificationDelegate();
+
+  const existing = await notificationDelegate.findUnique({
+    where: { id: notificationId },
+    select: { id: true, userId: true },
+  });
+
+  if (!existing) {
+    throw ApiError.notFound('Notification not found');
+  }
+
+  if (req.user.id !== existing.userId) {
+    throw ApiError.forbidden('You can only mark your own notifications');
+  }
+
+  const notification = await notificationDelegate.update({
     where: { id: notificationId },
     data: { 
       isRead: true,
@@ -84,7 +135,13 @@ const markNotificationRead = asyncHandler(async (req, res) => {
 const setNotificationPreferences = asyncHandler(async (req, res) => {
   const { studentId, preferences } = req.body;
 
-  const prefs = await prisma.notificationPreferences.upsert({
+  if (req.user.role === 'student' && req.user.id !== studentId) {
+    throw ApiError.forbidden('You can only update your own preferences');
+  }
+
+  const notificationPreferencesDelegate = getNotificationPreferencesDelegate();
+
+  const prefs = await notificationPreferencesDelegate.upsert({
     where: { studentId },
     create: {
       studentId,
@@ -103,13 +160,19 @@ const setNotificationPreferences = asyncHandler(async (req, res) => {
 const getNotificationPreferences = asyncHandler(async (req, res) => {
   const { studentId } = req.params;
 
-  let preferences = await prisma.notificationPreferences.findUnique({
+  if (req.user.role === 'student' && req.user.id !== studentId) {
+    throw ApiError.forbidden('You can only view your own preferences');
+  }
+
+  const notificationPreferencesDelegate = getNotificationPreferencesDelegate();
+
+  let preferences = await notificationPreferencesDelegate.findUnique({
     where: { studentId },
   });
 
   // Create default preferences if not found
   if (!preferences) {
-    preferences = await prisma.notificationPreferences.create({
+    preferences = await notificationPreferencesDelegate.create({
       data: { studentId },
     });
   }

@@ -9,6 +9,13 @@ const { examValidation, attemptValidation } = require('../middleware/validation'
 // =====================================================
 
 /**
+ * @route PUT /api/v1/exams/attempts/:attemptId/skip
+ * @desc Skip a question (legacy)
+ * @access Private (Student)
+ */
+router.put('/attempts/:attemptId/skip', authenticate, isStudent, examController.skipQuestion);
+
+/**
  * @route GET /api/v1/exams
  * @desc Get all exams (filtered by role)
  * @access Private
@@ -42,6 +49,13 @@ router.post('/', authenticate, isEducatorOrAdmin, examValidation.create, examCon
  * @access Private
  */
 router.get('/:id', authenticate, examController.getExamById);
+
+/**
+ * @route GET /api/v1/exams/:id/preview
+ * @desc Get exam preview (metadata only, no questions)
+ * @access Private
+ */
+router.get('/:id/preview', authenticate, examController.getExamPreview);
 
 /**
  * @route PUT /api/v1/exams/:id
@@ -195,6 +209,13 @@ router.put('/:examId/attempts/:attemptId/answer', authenticate, isStudent, examC
  * @access Private (Student)
  */
 router.put('/:examId/attempts/:attemptId/mark-review', authenticate, isStudent, examController.markForReview);
+
+/**
+ * @route PUT /api/v1/exams/:examId/attempts/:attemptId/skip
+ * @desc Skip a question (mark as unanswered)
+ * @access Private (Student)
+ */
+router.put('/:examId/attempts/:attemptId/skip', authenticate, isStudent, examController.skipQuestion);
 
 /**
  * @route POST /api/v1/exams/:examId/attempts/:attemptId/submit
