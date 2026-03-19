@@ -1059,8 +1059,14 @@ class AnalyticsService {
       prisma.user.count({ where: { role: 'admin', isActive: true } }),
     ]);
 
-    const activeCourses = await prisma.course.count({ where: { isActive: true } });
+    const [activeCoursesCount, activeSubjectsCount] = await Promise.all([
+      prisma.course.count({ where: { isActive: true } }),
+      prisma.subject.count({ where: { isActive: true } }),
+    ]);
+    const activeCourses = activeCoursesCount || activeSubjectsCount;
+
     const totalExams = await prisma.exam.count();
+    const examsTaken = await prisma.examAttempt.count();
 
     const sixMonthsAgo = new Date();
     sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
@@ -1100,6 +1106,56 @@ class AnalyticsService {
       select: { firstName: true, lastName: true, role: true, createdAt: true },
     });
 
+    const usersWithDepartment = await prisma.user.findMany({
+      where: { isActive: true },
+      select: {
+        role: true,
+        department: { select: { name: true, code: true } },
+      },
+    });
+
+    const examsWithDepartment = await prisma.exam.findMany({
+      select: {
+        id: true,
+        subject: {
+          select: {
+            department: { select: { name: true, code: true } },
+          },
+        },
+      },
+    });
+
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 6);
+
+    const recentAttempts = await prisma.examAttempt.findMany({
+      where: {
+        startedAt: { gte: sevenDaysAgo },
+      },
+      select: {
+        examId: true,
+        startedAt: true,
+        submittedAt: true,
+        status: true,
+      },
+    });
+
+    const allAttempts = await prisma.examAttempt.findMany({
+      select: {
+        examId: true,
+        status: true,
+        startedAt: true,
+        submittedAt: true,
+      },
+    });
+
+    const allExams = await prisma.exam.findMany({
+      select: {
+        id: true,
+        title: true,
+      },
+    });
+
     const recentActivity = recentUsers.map((u) => ({
       action: 'User registered',
       user: `${u.firstName} ${u.lastName}`,
@@ -1107,16 +1163,162 @@ class AnalyticsService {
       type: u.role,
     }));
 
+    const departmentStatsMap = new Map();
+    usersWithDepartment.forEach((u) => {
+      const deptName = u.department?.name || 'Other';
+      const deptCode = u.department?.code || '';
+      const key = deptCode || deptName;
+      if (!departmentStatsMap.has(key)) {
+        departmentStatsMap.set(key, {
+          dept: deptCode ? `${deptName} (${deptCode})` : deptName,
+          students: 0,
+          educators: 0,
+          exams: 0,
+        });
+      }
+      const current = departmentStatsMap.get(key);
+      if (u.role === 'student') current.students += 1;
+      if (u.role === 'educator') current.educators += 1;
+    });
+
+    examsWithDepartment.forEach((e) => {
+      const deptName = e.subject?.department?.name || 'Other';
+      const deptCode = e.subject?.department?.code || '';
+      const key = deptCode || deptName;
+      if (!departmentStatsMap.has(key)) {
+        departmentStatsMap.set(key, {
+          dept: deptCode ? `${deptName} (${deptCode})` : deptName,
+          students: 0,
+          educators: 0,
+          exams: 0,
+        });
+      }
+      departmentStatsMap.get(key).exams += 1;
+    });
+
+    const departmentStats = Array.from(departmentStatsMap.values()).sort((a, b) => b.students - a.students);
+
+    const departmentUsage = departmentStats.map((d) => {
+      const users = d.students + d.educators;
+      return {
+        name: d.dept,
+        users,
+        value: totalUsers > 0 ? Math.round((users / totalUsers) * 100) : 0,
+      };
+    });
+
+    const dateKey = (date) => date.toISOString().slice(0, 10);
+    const dateLabel = (date) => `${date.getMonth() + 1}/${date.getDate()}`;
+
+    const newUsersByDate = new Map();
+    const recentCreatedUsers = await prisma.user.findMany({
+      where: { createdAt: { gte: sevenDaysAgo }, isActive: true },
+      select: { createdAt: true },
+    });
+    recentCreatedUsers.forEach((u) => {
+      const key = dateKey(u.createdAt);
+      newUsersByDate.set(key, (newUsersByDate.get(key) || 0) + 1);
+    });
+
+    const startedByDate = new Map();
+    const completedByDate = new Map();
+    recentAttempts.forEach((a) => {
+      const startedKey = dateKey(a.startedAt);
+      startedByDate.set(startedKey, (startedByDate.get(startedKey) || 0) + 1);
+
+      if (a.submittedAt || ['submitted', 'auto_submitted', 'graded'].includes(a.status)) {
+        const completedKey = dateKey(a.submittedAt || a.startedAt);
+        completedByDate.set(completedKey, (completedByDate.get(completedKey) || 0) + 1);
+      }
+    });
+
+    const userActivity = [];
+    const examActivity = [];
+    let runningActiveUsers = Math.max(0, totalUsers - recentCreatedUsers.length);
+    for (let i = 6; i >= 0; i--) {
+      const date = new Date();
+      date.setHours(0, 0, 0, 0);
+      date.setDate(date.getDate() - i);
+      const key = dateKey(date);
+      const newUsers = newUsersByDate.get(key) || 0;
+      runningActiveUsers += newUsers;
+
+      userActivity.push({
+        date: dateLabel(date),
+        activeUsers: runningActiveUsers,
+        newUsers,
+      });
+
+      examActivity.push({
+        date: dateLabel(date),
+        started: startedByDate.get(key) || 0,
+        completed: completedByDate.get(key) || 0,
+        avgScore: 0,
+      });
+    }
+
+    const attemptsByExam = new Map();
+    allAttempts.forEach((a) => {
+      if (!attemptsByExam.has(a.examId)) {
+        attemptsByExam.set(a.examId, { total: 0, completed: 0, responseSeconds: 0, responseCount: 0 });
+      }
+      const agg = attemptsByExam.get(a.examId);
+      agg.total += 1;
+      if (a.submittedAt || ['submitted', 'auto_submitted', 'graded'].includes(a.status)) {
+        agg.completed += 1;
+      }
+      if (a.submittedAt && a.startedAt) {
+        const diffSeconds = Math.max(0, Math.floor((new Date(a.submittedAt) - new Date(a.startedAt)) / 1000));
+        agg.responseSeconds += diffSeconds;
+        agg.responseCount += 1;
+      }
+    });
+
+    const topExams = allExams
+      .map((e) => {
+        const agg = attemptsByExam.get(e.id) || { total: 0, completed: 0, responseSeconds: 0, responseCount: 0 };
+        return {
+          exam: e.title,
+          attempts: agg.total,
+          avgScore: 0,
+          completion: agg.total > 0 ? Math.round((agg.completed / agg.total) * 100) : 0,
+        };
+      })
+      .sort((a, b) => b.attempts - a.attempts)
+      .slice(0, 5);
+
+    const overallResponse = allAttempts.reduce(
+      (acc, a) => {
+        if (a.submittedAt && a.startedAt) {
+          acc.totalSeconds += Math.max(0, Math.floor((new Date(a.submittedAt) - new Date(a.startedAt)) / 1000));
+          acc.count += 1;
+        }
+        return acc;
+      },
+      { totalSeconds: 0, count: 0 }
+    );
+
+    const avgResponseTime = overallResponse.count > 0
+      ? `${Math.max(1, Math.round(overallResponse.totalSeconds / overallResponse.count))}s`
+      : '-';
+
     return {
       totalUsers,
       totalStudents,
       totalEducators,
       totalAdmins,
       totalExams,
+      examsTaken,
       activeCourses,
       userGrowth,
-      departmentStats: [],
+      departmentStats,
       recentActivity,
+      userActivity,
+      examActivity,
+      departmentUsage,
+      topExams,
+      avgResponseTime,
+      storageUsed: '-',
     };
   }
 }
