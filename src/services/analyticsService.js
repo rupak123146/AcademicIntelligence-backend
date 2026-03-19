@@ -1061,7 +1061,7 @@ class AnalyticsService {
 
     const [activeCoursesCount, activeSubjectsCount] = await Promise.all([
       prisma.course.count({ where: { isActive: true } }),
-      prisma.subject.count({ where: { isActive: true } }),
+      prisma.subject.count(),
     ]);
     const activeCourses = activeCoursesCount || activeSubjectsCount;
 
@@ -1119,7 +1119,7 @@ class AnalyticsService {
         id: true,
         subject: {
           select: {
-            department: { select: { name: true, code: true } },
+            department: true,
           },
         },
       },
@@ -1182,8 +1182,8 @@ class AnalyticsService {
     });
 
     examsWithDepartment.forEach((e) => {
-      const deptName = e.subject?.department?.name || 'Other';
-      const deptCode = e.subject?.department?.code || '';
+      const deptName = e.subject?.department || 'Other';
+      const deptCode = '';
       const key = deptCode || deptName;
       if (!departmentStatsMap.has(key)) {
         departmentStatsMap.set(key, {
