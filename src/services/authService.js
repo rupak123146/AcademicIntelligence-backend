@@ -33,8 +33,8 @@ class AuthService {
     const defaultInstitution = await prisma.institution.findFirst({
       where: {
         OR: [
-          { code: { equals: 'KEC', mode: 'insensitive' } },
-          { name: { contains: 'Kongu', mode: 'insensitive' } },
+          { code: 'KEC' },
+          { name: { contains: 'Kongu' } },
           { isActive: true },
         ],
       },
