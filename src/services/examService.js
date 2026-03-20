@@ -396,7 +396,10 @@ class ExamService {
       logger.warn('Failed to sync expired exam statuses before getExams', { userId, error: error.message });
     });
 
-    const query = { institutionId: user.institutionId };
+    const query = {};
+    if (user?.institutionId) {
+      query.institutionId = user.institutionId;
+    }
 
     if (userRole === 'student') {
       query.status = { in: ['published', 'active', 'completed'] };

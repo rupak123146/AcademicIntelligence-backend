@@ -11,6 +11,13 @@ const { authValidation } = require('../middleware/validation');
  */
 router.post('/register', authValidation.register, authController.register);
 
+router.get('/register', (req, res) => {
+	res.status(405).json({
+		success: false,
+		message: 'Use POST /api/v1/auth/register to create a user',
+	});
+});
+
 /**
  * @route POST /api/v1/auth/login
  * @desc Login user

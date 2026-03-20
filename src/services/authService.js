@@ -11,6 +11,11 @@ const logger = require('../utils/logger');
 const { createNotification } = require('./notificationService');
 
 class AuthService {
+  normalizeRelationId(value) {
+    if (value === undefined || value === null || value === '') return undefined;
+    return String(value);
+  }
+
   /**
    * Register a new user
    */
@@ -36,6 +41,44 @@ class AuthService {
     // Hash password
     const passwordHash = await hashPassword(password);
 
+    const normalizedInstitutionId = this.normalizeRelationId(institutionId);
+    const normalizedDepartmentId = this.normalizeRelationId(departmentId);
+    const normalizedSectionId = this.normalizeRelationId(sectionId);
+    const normalizedAssignedSections = Array.isArray(assignedSections)
+      ? assignedSections.map((id) => this.normalizeRelationId(id)).filter(Boolean)
+      : [];
+
+    // Validate referenced records when IDs are provided so API returns clean 4xx errors.
+    if (normalizedInstitutionId) {
+      const institutionExists = await prisma.institution.findUnique({
+        where: { id: normalizedInstitutionId },
+        select: { id: true },
+      });
+      if (!institutionExists) {
+        throw ApiError.badRequest('Invalid institutionId provided');
+      }
+    }
+
+    if (normalizedDepartmentId) {
+      const departmentExists = await prisma.department.findUnique({
+        where: { id: normalizedDepartmentId },
+        select: { id: true },
+      });
+      if (!departmentExists) {
+        throw ApiError.badRequest('Invalid departmentId provided');
+      }
+    }
+
+    if (normalizedSectionId) {
+      const sectionExists = await prisma.section.findUnique({
+        where: { id: normalizedSectionId },
+        select: { id: true },
+      });
+      if (!sectionExists) {
+        throw ApiError.badRequest('Invalid sectionId provided');
+      }
+    }
+
     // Create user with all provided fields
     const user = await prisma.user.create({
       data: {
@@ -44,15 +87,15 @@ class AuthService {
         firstName,
         lastName,
         role: role || 'student',
-        institutionId: institutionId || undefined,
-        departmentId: departmentId || undefined,
+        institutionId: normalizedInstitutionId,
+        departmentId: normalizedDepartmentId,
         studentId: studentId || undefined,
-        sectionId: sectionId || undefined,
+        sectionId: normalizedSectionId,
         employeeId: employeeId || undefined,
         designation: designation || undefined,
-        educatorSections: assignedSections?.length
+        educatorSections: normalizedAssignedSections.length
           ? {
-            create: assignedSections.map((sectionId) => ({ sectionId })),
+            create: normalizedAssignedSections.map((sectionId) => ({ sectionId })),
           }
           : undefined,
       },
