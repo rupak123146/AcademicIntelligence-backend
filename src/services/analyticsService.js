@@ -1148,6 +1148,7 @@ class AnalyticsService {
         status: true,
         startedAt: true,
         submittedAt: true,
+        percentage: true,
       },
     });
 
@@ -1262,12 +1263,23 @@ class AnalyticsService {
     const attemptsByExam = new Map();
     allAttempts.forEach((a) => {
       if (!attemptsByExam.has(a.examId)) {
-        attemptsByExam.set(a.examId, { total: 0, completed: 0, responseSeconds: 0, responseCount: 0 });
+        attemptsByExam.set(a.examId, {
+          total: 0,
+          completed: 0,
+          responseSeconds: 0,
+          responseCount: 0,
+          scoreSum: 0,
+          scoreCount: 0,
+        });
       }
       const agg = attemptsByExam.get(a.examId);
       agg.total += 1;
       if (a.submittedAt || ['submitted', 'auto_submitted', 'graded'].includes(a.status)) {
         agg.completed += 1;
+      }
+      if (typeof a.percentage === 'number') {
+        agg.scoreSum += a.percentage;
+        agg.scoreCount += 1;
       }
       if (a.submittedAt && a.startedAt) {
         const diffSeconds = Math.max(0, Math.floor((new Date(a.submittedAt) - new Date(a.startedAt)) / 1000));
@@ -1278,11 +1290,18 @@ class AnalyticsService {
 
     const topExams = allExams
       .map((e) => {
-        const agg = attemptsByExam.get(e.id) || { total: 0, completed: 0, responseSeconds: 0, responseCount: 0 };
+        const agg = attemptsByExam.get(e.id) || {
+          total: 0,
+          completed: 0,
+          responseSeconds: 0,
+          responseCount: 0,
+          scoreSum: 0,
+          scoreCount: 0,
+        };
         return {
           exam: e.title,
           attempts: agg.total,
-          avgScore: 0,
+          avgScore: agg.scoreCount > 0 ? Math.round((agg.scoreSum / agg.scoreCount) * 100) / 100 : 0,
           completion: agg.total > 0 ? Math.round((agg.completed / agg.total) * 100) : 0,
         };
       })
