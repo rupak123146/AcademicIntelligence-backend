@@ -16,6 +16,39 @@ class AuthService {
     return String(value);
   }
 
+  async resolveInstitutionId(rawInstitutionId) {
+    const normalizedInstitutionId = this.normalizeRelationId(rawInstitutionId);
+
+    if (normalizedInstitutionId) {
+      const institutionExists = await prisma.institution.findUnique({
+        where: { id: normalizedInstitutionId },
+        select: { id: true },
+      });
+      if (institutionExists) {
+        return institutionExists.id;
+      }
+    }
+
+    // Fall back to the known default institution (Kongu) or first active institution.
+    const defaultInstitution = await prisma.institution.findFirst({
+      where: {
+        OR: [
+          { code: { equals: 'KEC', mode: 'insensitive' } },
+          { name: { contains: 'Kongu', mode: 'insensitive' } },
+          { isActive: true },
+        ],
+      },
+      orderBy: [{ isActive: 'desc' }, { createdAt: 'asc' }],
+      select: { id: true },
+    });
+
+    if (!defaultInstitution) {
+      throw ApiError.badRequest('No institution available for registration');
+    }
+
+    return defaultInstitution.id;
+  }
+
   /**
    * Register a new user
    */
@@ -41,31 +74,23 @@ class AuthService {
     // Hash password
     const passwordHash = await hashPassword(password);
 
-    const normalizedInstitutionId = this.normalizeRelationId(institutionId);
+    const normalizedInstitutionId = await this.resolveInstitutionId(institutionId);
     const normalizedDepartmentId = this.normalizeRelationId(departmentId);
     const normalizedSectionId = this.normalizeRelationId(sectionId);
     const normalizedAssignedSections = Array.isArray(assignedSections)
       ? assignedSections.map((id) => this.normalizeRelationId(id)).filter(Boolean)
       : [];
 
-    // Validate referenced records when IDs are provided so API returns clean 4xx errors.
-    if (normalizedInstitutionId) {
-      const institutionExists = await prisma.institution.findUnique({
-        where: { id: normalizedInstitutionId },
-        select: { id: true },
-      });
-      if (!institutionExists) {
-        throw ApiError.badRequest('Invalid institutionId provided');
-      }
-    }
-
     if (normalizedDepartmentId) {
       const departmentExists = await prisma.department.findUnique({
         where: { id: normalizedDepartmentId },
-        select: { id: true },
+        select: { id: true, institutionId: true },
       });
       if (!departmentExists) {
         throw ApiError.badRequest('Invalid departmentId provided');
+      }
+      if (departmentExists.institutionId !== normalizedInstitutionId) {
+        throw ApiError.badRequest('Department does not belong to the selected institution');
       }
     }
 

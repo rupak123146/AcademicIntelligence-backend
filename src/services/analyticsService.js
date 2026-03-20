@@ -1091,7 +1091,9 @@ class AnalyticsService {
       };
 
       userGrowthData.forEach((item) => {
-        if (item.month === date.getMonth() + 1 && item.year === date.getFullYear()) {
+        const itemMonth = Number(item.month);
+        const itemYear = Number(item.year);
+        if (itemMonth === date.getMonth() + 1 && itemYear === date.getFullYear()) {
           if (item.role === 'student') monthData.students = Number(item.count);
           if (item.role === 'educator') monthData.educators = Number(item.count);
         }
